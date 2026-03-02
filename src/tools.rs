@@ -4252,6 +4252,10 @@ impl BashOutputState {
 }
 
 async fn ingest_bash_chunk(chunk: Vec<u8>, state: &mut BashOutputState) -> Result<()> {
+    if chunk.is_empty() {
+        return Ok(());
+    }
+
     state.last_byte_was_newline = chunk.last().is_some_and(|byte| *byte == b'\n');
     state.total_bytes = state.total_bytes.saturating_add(chunk.len());
     state.line_count = state
