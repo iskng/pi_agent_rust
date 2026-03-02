@@ -1,17 +1,17 @@
 # Extension Conformance Report
 
-> Generated: 2026-02-16T20:45:35Z
+> Generated: 2026-03-02T19:08:56Z
 
 ## Summary
 
 | Metric | Value |
 |----|----|
-| Total extensions | 223 |
+| Total extensions | 224 |
 | PASS | 60 |
 | FAIL | 0 |
-| N/A (not yet tested) | 163 |
+| N/A (not yet tested) | 164 |
 | Pass rate (tested only) | 100.0% |
-| Coverage (tested/total) | 26.9% |
+| Coverage (tested/total) | 26.8% |
 | Policy negative tests | 30 pass, 0 fail |
 | Source tiers | 5 |
 
@@ -68,10 +68,10 @@
 | [`community/prateekmedia-ralph-loop`](tests/ext_conformance/artifacts/community/prateekmedia-ralph-loop/ralph-loop.ts) | - | T3 (multi-file) | N/A | - | - | - |  |
 | [`community/prateekmedia-repeat`](tests/ext_conformance/artifacts/community/prateekmedia-repeat/repeat.ts) | - | T3 (multi-file) | N/A | - | - | - |  |
 | [`community/prateekmedia-token-rate`](tests/ext_conformance/artifacts/community/prateekmedia-token-rate/token-rate.ts) | - | T2 (multi-registration) | N/A | - | - | - |  |
-| [`community/qualisero-background-notify`](tests/ext_conformance/artifacts/community/qualisero-background-notify/index.ts) | - | T2 (multi-registration) | N/A | - | - | - |  |
+| [`community/qualisero-background-notify`](tests/ext_conformance/artifacts/community/qualisero-background-notify/index.ts) | - | T3 (multi-file) | N/A | - | - | - |  |
 | [`community/qualisero-compact-config`](tests/ext_conformance/artifacts/community/qualisero-compact-config/compact-config.ts) | - | T2 (multi-registration) | N/A | - | - | - |  |
 | [`community/qualisero-pi-agent-scip`](tests/ext_conformance/artifacts/community/qualisero-pi-agent-scip/index.ts) | - | T3 (multi-file) | N/A | - | - | - |  |
-| [`community/qualisero-safe-git`](tests/ext_conformance/artifacts/community/qualisero-safe-git/index.ts) | - | T2 (multi-registration) | N/A | - | - | - |  |
+| [`community/qualisero-safe-git`](tests/ext_conformance/artifacts/community/qualisero-safe-git/index.ts) | - | T3 (multi-file) | N/A | - | - | - |  |
 | [`community/qualisero-safe-rm`](tests/ext_conformance/artifacts/community/qualisero-safe-rm/index.ts) | - | T2 (multi-registration) | N/A | - | - | - |  |
 | [`community/qualisero-session-color`](tests/ext_conformance/artifacts/community/qualisero-session-color/index.ts) | - | T2 (multi-registration) | N/A | - | - | - |  |
 | [`community/qualisero-session-emoji`](tests/ext_conformance/artifacts/community/qualisero-session-emoji/index.ts) | - | T2 (multi-registration) | N/A | - | - | - |  |
@@ -90,10 +90,11 @@
 
 ## npm-registry
 
-75 extensions (0 pass, 0 fail, 75 untested)
+76 extensions (0 pass, 0 fail, 76 untested)
 
 | Extension | Version | Tier | Status | Evidence | Load (Rust) | Scenarios | Failures |
 |---|---|---|---|---|---|---|---|
+| [`npm/agentsbox`](tests/ext_conformance/artifacts/npm/agentsbox/dist/pi.js) | - | T3 (multi-file) | N/A | - | - | - |  |
 | [`npm/aliou-pi-extension-dev`](tests/ext_conformance/artifacts/npm/aliou-pi-extension-dev/index.ts) | `0.2.0` | T3 (multi-file) | N/A | - | - | - |  |
 | [`npm/aliou-pi-guardrails`](tests/ext_conformance/artifacts/npm/aliou-pi-guardrails/index.ts) | `0.6.1` | T3 (multi-file) | N/A | - | - | - |  |
 | [`npm/aliou-pi-linkup`](tests/ext_conformance/artifacts/npm/aliou-pi-linkup/src/index.ts) | `0.3.1` | T3 (multi-file) | N/A | - | - | - |  |
@@ -108,7 +109,7 @@
 | [`npm/juanibiapina-pi-extension-settings`](tests/ext_conformance/artifacts/npm/juanibiapina-pi-extension-settings/dist/index.js) | `0.4.0` | T3 (multi-file) | N/A | - | - | - |  |
 | [`npm/juanibiapina-pi-files`](tests/ext_conformance/artifacts/npm/juanibiapina-pi-files/dist/index.js) | `0.1.0` | T3 (multi-file) | N/A | - | - | - |  |
 | [`npm/juanibiapina-pi-gob`](tests/ext_conformance/artifacts/npm/juanibiapina-pi-gob/dist/index.js) | `0.2.0` | T3 (multi-file) | N/A | - | - | - |  |
-| [`npm/lsp-pi`](tests/ext_conformance/artifacts/npm/lsp-pi/lsp.ts) | `1.0.1` | T3 (multi-file) | N/A | - | - | - |  |
+| [`npm/lsp-pi`](tests/ext_conformance/artifacts/npm/lsp-pi/lsp-tool.ts) | `1.0.1` | T3 (multi-file) | N/A | - | - | - |  |
 | [`npm/marckrenn-pi-sub-bar`](tests/ext_conformance/artifacts/npm/marckrenn-pi-sub-bar/index.ts) | `1.0.4` | T3 (multi-file) | N/A | - | - | - |  |
 | [`npm/marckrenn-pi-sub-core`](tests/ext_conformance/artifacts/npm/marckrenn-pi-sub-core/index.ts) | `1.0.4` | T3 (multi-file) | N/A | - | - | - |  |
 | [`npm/mitsupi`](tests/ext_conformance/artifacts/npm/mitsupi/pi-extensions/answer.ts) | - | T5 (exec/network) | N/A | - | - | - |  |
@@ -158,7 +159,7 @@
 | [`npm/ralph-loop-pi`](tests/ext_conformance/artifacts/npm/ralph-loop-pi/ralph-loop.ts) | `1.0.1` | T3 (multi-file) | N/A | - | - | - |  |
 | [`npm/repeat-pi`](tests/ext_conformance/artifacts/npm/repeat-pi/repeat.ts) | `0.50.0` | T3 (multi-file) | N/A | - | - | - |  |
 | [`npm/shitty-extensions`](tests/ext_conformance/artifacts/npm/shitty-extensions/extensions/clipboard.ts) | - | T3 (multi-file) | N/A | - | - | - |  |
-| [`npm/tmustier-pi-arcade`](tests/ext_conformance/artifacts/npm/tmustier-pi-arcade/spice-invaders.ts) | `0.1.5` | T3 (multi-file) | N/A | - | - | - |  |
+| [`npm/tmustier-pi-arcade`](tests/ext_conformance/artifacts/npm/tmustier-pi-arcade/mario-not/mario-not.ts) | `0.1.5` | T3 (multi-file) | N/A | - | - | - |  |
 | [`npm/token-rate-pi`](tests/ext_conformance/artifacts/npm/token-rate-pi/token-rate.ts) | `1.0.2` | T2 (multi-registration) | N/A | - | - | - |  |
 | [`npm/vaayne-agent-kit`](tests/ext_conformance/artifacts/npm/vaayne-agent-kit/extensions/mcp/index.ts) | `1.0.0` | T3 (multi-file) | N/A | - | - | - |  |
 | [`npm/vaayne-pi-mcp`](tests/ext_conformance/artifacts/npm/vaayne-pi-mcp/index.ts) | `0.2.0` | T3 (multi-file) | N/A | - | - | - |  |
@@ -191,7 +192,7 @@
 | [`custom-provider-qwen-cli`](tests/ext_conformance/artifacts/custom-provider-qwen-cli/index.ts) | `1.1.0` | T3 (multi-file) | PASS | [fixture](tests/ext_conformance/fixtures/custom-provider-qwen-cli.json) [smoke](tests/ext_conformance/reports/extensions/custom-provider-qwen-cli.jsonl) [parity](tests/ext_conformance/reports/parity/extensions/custom-provider-qwen-cli.jsonl) | 105ms | 1/1 pass |  |
 | [`diff`](tests/ext_conformance/artifacts/diff/diff.ts) | - | T2 (multi-registration) | N/A | - | - | - |  |
 | [`dirty-repo-guard`](tests/ext_conformance/artifacts/dirty-repo-guard/dirty-repo-guard.ts) | - | T2 (multi-registration) | PASS | [fixture](tests/ext_conformance/fixtures/dirty-repo-guard.json) | 99ms | - |  |
-| [`doom-overlay`](tests/ext_conformance/artifacts/doom-overlay/index.ts) | - | T3 (multi-file) | PASS | [fixture](tests/ext_conformance/fixtures/doom-overlay.json) [smoke](tests/ext_conformance/reports/extensions/doom-overlay.jsonl) [parity](tests/ext_conformance/reports/parity/extensions/doom-overlay.jsonl) | 118ms | 0/0 pass |  |
+| [`doom-overlay`](tests/ext_conformance/artifacts/doom-overlay/index.ts) | - | T3 (multi-file) | PASS | [fixture](tests/ext_conformance/fixtures/doom-overlay.json) [smoke](tests/ext_conformance/reports/extensions/doom-overlay.jsonl) [parity](tests/ext_conformance/reports/parity/extensions/doom-overlay.jsonl) | 118ms | 1/1 pass |  |
 | [`dynamic-resources`](tests/ext_conformance/artifacts/dynamic-resources/index.ts) | - | T2 (multi-registration) | PASS | [fixture](tests/ext_conformance/fixtures/dynamic-resources.json) [smoke](tests/ext_conformance/reports/extensions/dynamic-resources.jsonl) [parity](tests/ext_conformance/reports/parity/extensions/dynamic-resources.jsonl) | 104ms | 1/1 pass |  |
 | [`event-bus`](tests/ext_conformance/artifacts/event-bus/event-bus.ts) | - | T2 (multi-registration) | PASS | [fixture](tests/ext_conformance/fixtures/event-bus.json) | 99ms | - |  |
 | [`file-trigger`](tests/ext_conformance/artifacts/file-trigger/file-trigger.ts) | - | T2 (multi-registration) | PASS | [fixture](tests/ext_conformance/fixtures/file-trigger.json) | 98ms | - |  |
@@ -285,9 +286,9 @@
 
 ## Coverage Gaps
 
-163 extensions have not been tested yet.
+164 extensions have not been tested yet.
 
-**Multi-file extension (T3)** (82 extensions):
+**Multi-file extension (T3)** (85 extensions):
 - `base_fixtures`
 - `community/jyaunches-canvas`
 - `community/nicobailon-interactive-shell`
@@ -299,9 +300,12 @@
 - `community/prateekmedia-permission`
 - `community/prateekmedia-ralph-loop`
 - `community/prateekmedia-repeat`
+- `community/qualisero-background-notify`
 - `community/qualisero-pi-agent-scip`
+- `community/qualisero-safe-git`
 - `community/tmustier-code-actions`
 - `community/tmustier-files-widget`
+- `npm/agentsbox`
 - `npm/aliou-pi-extension-dev`
 - `npm/aliou-pi-guardrails`
 - `npm/aliou-pi-linkup`
@@ -371,7 +375,7 @@
 - `third-party/w-winter-dot314`
 - `third-party/zenobi-us-pi-dcp`
 
-**Not yet scheduled** (73 extensions):
+**Not yet scheduled** (71 extensions):
 - `community/ferologics-notify`
 - `community/hjanuschka-clipboard`
 - `community/hjanuschka-cost-tracker`
@@ -399,9 +403,7 @@
 - `community/nicobailon-rewind-hook`
 - `community/ogulcancelik-ghostty-theme-sync`
 - `community/prateekmedia-token-rate`
-- `community/qualisero-background-notify`
 - `community/qualisero-compact-config`
-- `community/qualisero-safe-git`
 - `community/qualisero-safe-rm`
 - `community/qualisero-session-color`
 - `community/qualisero-session-emoji`
