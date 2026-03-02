@@ -167,7 +167,7 @@ fn kimi_device_id() -> String {
     }
 
     let mut options = fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
+    options.write(true).create_new(true);
 
     #[cfg(unix)]
     {
