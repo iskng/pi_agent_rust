@@ -15944,7 +15944,7 @@ mod native_runtime_experimental {
             }
 
             {
-                let mut guard = self.state.lock().expect("lock error");
+                let mut guard = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 guard.snapshots = snapshots.clone();
                 guard.handlers_by_extension = handlers_by_extension;
                 guard.provider_streams.clear();
@@ -15956,7 +15956,7 @@ mod native_runtime_experimental {
         }
 
         pub async fn get_registered_tools(&self) -> Result<Vec<ExtensionToolDef>> {
-            let guard = self.state.lock().expect("lock error");
+            let guard = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             let mut defs = Vec::new();
             for snapshot in &guard.snapshots {
                 defs.extend(parse_extension_tool_defs(&snapshot.tools));
@@ -15993,7 +15993,7 @@ mod native_runtime_experimental {
             ctx_payload: Arc<Value>,
             _timeout_ms: u64,
         ) -> Result<Value> {
-            let guard = self.state.lock().expect("lock error");
+            let guard = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             let template =
                 Self::find_handler_template(&guard, NativeRustHandlerKind::Event, &event_name);
             let Some(template) = template else {
@@ -16047,7 +16047,7 @@ mod native_runtime_experimental {
             input: Value,
             ctx_payload: Arc<Value>,
         ) -> Result<Value> {
-            let guard = self.state.lock().expect("lock error");
+            let guard = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             let template =
                 Self::find_handler_template(&guard, NativeRustHandlerKind::Tool, tool_name)
                     .ok_or_else(|| {
@@ -16077,7 +16077,7 @@ mod native_runtime_experimental {
             ctx_payload: Arc<Value>,
             _timeout_ms: u64,
         ) -> Result<Value> {
-            let guard = self.state.lock().expect("lock error");
+            let guard = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             let template =
                 Self::find_handler_template(&guard, NativeRustHandlerKind::Command, &command_name)
                     .ok_or_else(|| {
@@ -16099,7 +16099,7 @@ mod native_runtime_experimental {
             ctx_payload: Arc<Value>,
             _timeout_ms: u64,
         ) -> Result<Value> {
-            let guard = self.state.lock().expect("lock error");
+            let guard = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             let template =
                 Self::find_handler_template(&guard, NativeRustHandlerKind::Shortcut, &key_id)
                     .ok_or_else(|| {
@@ -16120,7 +16120,7 @@ mod native_runtime_experimental {
             flag_name: String,
             value: Value,
         ) -> Result<()> {
-            let mut guard = self.state.lock().expect("lock error");
+            let mut guard = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             guard.flag_values.insert((extension_id, flag_name), value);
             Ok(())
         }
@@ -16137,7 +16137,7 @@ mod native_runtime_experimental {
             options: Value,
             _timeout_ms: u64,
         ) -> Result<String> {
-            let mut guard = self.state.lock().expect("lock error");
+            let mut guard = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             let mut chunks = None;
             for snapshot in &guard.snapshots {
                 let Some(handlers) = guard.handlers_by_extension.get(&snapshot.id) else {
@@ -16183,7 +16183,7 @@ mod native_runtime_experimental {
             stream_id: String,
             _timeout_ms: u64,
         ) -> Result<Option<Value>> {
-            let mut guard = self.state.lock().expect("lock error");
+            let mut guard = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             let done = {
                 let Some(stream) = guard.provider_streams.get_mut(&stream_id) else {
                     return Err(Error::extension(format!(
@@ -16210,13 +16210,13 @@ mod native_runtime_experimental {
             stream_id: String,
             _timeout_ms: u64,
         ) -> Result<()> {
-            let mut guard = self.state.lock().expect("lock error");
+            let mut guard = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             guard.provider_streams.remove(&stream_id);
             Ok(())
         }
 
         pub fn provider_stream_simple_cancel_best_effort(&self, stream_id: String) {
-            let mut guard = self.state.lock().expect("lock error");
+            let mut guard = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             guard.provider_streams.remove(&stream_id);
         }
     }
@@ -24144,13 +24144,13 @@ impl ExtensionManager {
 
     /// Set the budget for extension operations.
     pub fn set_budget(&self, budget: Budget) {
-        let mut guard = self.inner.lock().expect("lock error");
+        let mut guard = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         guard.extension_budget = budget;
     }
 
     /// Get the current extension operation budget.
     pub fn budget(&self) -> Budget {
-        let guard = self.inner.lock().expect("lock error");
+        let guard = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         guard.extension_budget
     }
 
@@ -24192,7 +24192,7 @@ impl ExtensionManager {
         fallback_reason: Option<&str>,
     ) -> u64 {
         let ext_key = Self::runtime_risk_extension_key(extension_id);
-        let mut guard = self.inner.lock().expect("lock error");
+        let mut guard = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let entry = guard
             .hostcall_marshalling_fallback_counts
             .entry(ext_key)
@@ -24233,7 +24233,7 @@ impl ExtensionManager {
 
     #[allow(clippy::needless_pass_by_value)]
     pub fn set_runtime_risk_config(&self, config: RuntimeRiskConfig) {
-        let mut guard = self.inner.lock().expect("lock error");
+        let mut guard = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let clamped = RuntimeRiskConfig {
             enabled: config.enabled,
             enforce: config.enforce,
@@ -24249,7 +24249,7 @@ impl ExtensionManager {
     pub fn runtime_risk_config(&self) -> RuntimeRiskConfig {
         self.inner
             .lock()
-            .expect("lock error")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .runtime_risk_config
             .clone()
     }
@@ -24258,12 +24258,12 @@ impl ExtensionManager {
 
     /// Get the current rollout phase.
     pub fn rollout_phase(&self) -> RolloutPhase {
-        self.inner.lock().expect("lock error").rollout_tracker.phase
+        self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner).rollout_tracker.phase
     }
 
     /// Set the rollout phase explicitly (operator override).
     pub fn set_rollout_phase(&self, phase: RolloutPhase) {
-        let mut guard = self.inner.lock().expect("lock error");
+        let mut guard = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         guard.rollout_tracker.set_phase(phase);
         // Sync the `enforce` flag with the phase.
         guard.runtime_risk_config.enforce = phase.is_enforcing();
@@ -24271,7 +24271,7 @@ impl ExtensionManager {
 
     /// Advance the rollout to the next phase. Returns `true` if changed.
     pub fn advance_rollout(&self) -> bool {
-        let mut guard = self.inner.lock().expect("lock error");
+        let mut guard = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let advanced = guard.rollout_tracker.advance();
         if advanced {
             guard.runtime_risk_config.enforce = guard.rollout_tracker.phase.is_enforcing();
@@ -24287,7 +24287,7 @@ impl ExtensionManager {
         was_error: bool,
         was_false_positive: bool,
     ) -> bool {
-        let mut guard = self.inner.lock().expect("lock error");
+        let mut guard = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let triggered =
             guard
                 .rollout_tracker
@@ -24300,7 +24300,7 @@ impl ExtensionManager {
 
     /// Configure the rollback trigger thresholds.
     pub fn set_rollback_trigger(&self, trigger: &RollbackTrigger) {
-        let mut guard = self.inner.lock().expect("lock error");
+        let mut guard = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         // Validate inputs to prevent misconfiguration that could silently
         // disable rollback triggers (NaN, 0 window, negative rates).
         guard.rollout_tracker.trigger = RollbackTrigger {
@@ -24321,7 +24321,7 @@ impl ExtensionManager {
 
     /// Get a snapshot of the current rollout state for operator inspection.
     pub fn rollout_state(&self) -> RolloutState {
-        let guard = self.inner.lock().expect("lock error");
+        let guard = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let phase = guard.rollout_tracker.phase;
         let enforce = guard.runtime_risk_config.enforce;
         let enabled = guard.runtime_risk_config.enabled;
@@ -25018,7 +25018,7 @@ impl ExtensionManager {
         policy_reason: &str,
     ) -> Option<RuntimeRiskDecision> {
         let started = Instant::now();
-        let mut guard = self.inner.lock().expect("lock error");
+        let mut guard = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let config = guard.runtime_risk_config.clone();
         if !config.enabled {
             return None;
@@ -25343,7 +25343,7 @@ impl ExtensionManager {
         lane_execution: Option<&HostcallLaneExecution>,
         marshalling: &HostcallMarshallingTelemetry,
     ) {
-        let mut guard = self.inner.lock().expect("lock error");
+        let mut guard = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if !guard.runtime_risk_config.enabled {
             return;
         }
@@ -25617,7 +25617,7 @@ impl ExtensionManager {
 
     pub fn runtime_risk_ledger_artifact(&self) -> RuntimeRiskLedgerArtifact {
         let entries = {
-            let guard = self.inner.lock().expect("lock error");
+            let guard = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             guard
                 .runtime_risk_ledger
                 .iter()
@@ -25640,7 +25640,7 @@ impl ExtensionManager {
 
     pub fn runtime_hostcall_telemetry_artifact(&self) -> RuntimeHostcallTelemetryArtifact {
         let entries = {
-            let guard = self.inner.lock().expect("lock error");
+            let guard = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             guard
                 .runtime_hostcall_telemetry
                 .iter()
@@ -25707,7 +25707,7 @@ impl ExtensionManager {
 
     /// Record an exec mediation decision into the SEC-4.3 ledger.
     pub fn record_exec_mediation(&self, entry: ExecMediationLedgerEntry) {
-        let mut guard = self.inner.lock().expect("lock error");
+        let mut guard = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         guard.exec_mediation_ledger.push_back(entry);
         // Cap at same limit as runtime-risk ledger.
         while guard.exec_mediation_ledger.len() > guard.runtime_risk_config.ledger_limit {
@@ -25718,7 +25718,7 @@ impl ExtensionManager {
 
     /// Record a secret broker decision into the SEC-4.3 ledger.
     pub fn record_secret_broker(&self, entry: SecretBrokerLedgerEntry) {
-        let mut guard = self.inner.lock().expect("lock error");
+        let mut guard = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         guard.secret_broker_ledger.push_back(entry);
         while guard.secret_broker_ledger.len() > guard.runtime_risk_config.ledger_limit {
             let _ = guard.secret_broker_ledger.pop_front();
@@ -25792,7 +25792,7 @@ impl ExtensionManager {
 
     /// Record a security alert into the SEC-5.1 alert stream.
     pub fn record_security_alert(&self, mut alert: SecurityAlert) {
-        let mut guard = self.inner.lock().expect("lock error");
+        let mut guard = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         guard.security_alert_seq += 1;
         alert.sequence_id = guard.security_alert_seq;
         guard.security_alerts.push_back(alert);
@@ -25985,7 +25985,7 @@ impl ExtensionManager {
     /// Fast-lane opcodes will be routed through per-shard SPSC lanes
     /// for reduced cross-core contention.
     pub fn enable_hostcall_reactor(&self, config: HostcallReactorConfig) {
-        let mut guard = self.inner.lock().expect("lock error");
+        let mut guard = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let shard_count = config.shard_count;
         guard.hostcall_reactor = Some(HostcallReactorMesh::new(config));
         drop(guard);
@@ -25998,7 +25998,7 @@ impl ExtensionManager {
 
     /// Disable the hostcall reactor mesh.
     pub fn disable_hostcall_reactor(&self) {
-        let mut guard = self.inner.lock().expect("lock error");
+        let mut guard = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         guard.hostcall_reactor = None;
         drop(guard);
         tracing::info!(
@@ -26093,7 +26093,7 @@ impl ExtensionManager {
         reason: &str,
         operator: &str,
     ) -> KillSwitchResult {
-        let mut guard = self.inner.lock().expect("lock error");
+        let mut guard = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let previous = guard
             .trust_states
             .get(extension_id)
@@ -26177,7 +26177,7 @@ impl ExtensionManager {
         reason: &str,
         operator: &str,
     ) -> KillSwitchResult {
-        let mut guard = self.inner.lock().expect("lock error");
+        let mut guard = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let previous = guard
             .trust_states
             .get(extension_id)
@@ -26293,7 +26293,7 @@ impl ExtensionManager {
         accepted: bool,
         operator: &str,
     ) -> ExtensionTrustState {
-        let mut guard = self.inner.lock().expect("lock error");
+        let mut guard = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let resulting_state = if accepted {
             ExtensionTrustState::Acknowledged
         } else {
@@ -26351,7 +26351,7 @@ impl ExtensionManager {
     ///
     /// Only extensions currently in `Acknowledged` state can be promoted.
     pub fn promote_trust(&self, extension_id: &str) -> ExtensionTrustState {
-        let mut guard = self.inner.lock().expect("lock error");
+        let mut guard = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let current = guard
             .trust_states
             .get(extension_id)
@@ -26426,14 +26426,14 @@ impl ExtensionManager {
     /// cleanly within the budget.
     pub async fn shutdown(&self, budget: Duration) -> bool {
         let runtime = {
-            let guard = self.inner.lock().expect("lock error");
+            let guard = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             guard.runtime.clone()
         };
 
         if let Some(runtime) = runtime {
             let ok = runtime.shutdown(budget).await;
             // Clear the runtime handle so subsequent calls are no-ops.
-            let mut guard = self.inner.lock().expect("lock error");
+            let mut guard = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             guard.runtime = None;
             ok
         } else {
@@ -26442,19 +26442,19 @@ impl ExtensionManager {
     }
 
     pub fn set_ui_sender(&self, sender: mpsc::Sender<ExtensionUiRequest>) {
-        let mut guard = self.inner.lock().expect("lock error");
+        let mut guard = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         guard.ui_sender = Some(sender);
         self.refresh_snapshot_with_guard_release(guard);
     }
 
     pub fn clear_ui_sender(&self) {
-        let mut guard = self.inner.lock().expect("lock error");
+        let mut guard = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         guard.ui_sender = None;
         self.refresh_snapshot_with_guard_release(guard);
     }
 
     pub fn set_runtime(&self, runtime: ExtensionRuntimeHandle) {
-        let mut guard = self.inner.lock().expect("lock error");
+        let mut guard = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         guard.runtime = Some(runtime);
         drop(guard);
     }
@@ -26468,14 +26468,14 @@ impl ExtensionManager {
     }
 
     pub fn set_cwd(&self, cwd: String) {
-        let mut guard = self.inner.lock().expect("lock error");
+        let mut guard = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         guard.cwd = Some(cwd);
         guard.ctx_generation = guard.ctx_generation.wrapping_add(1);
         self.refresh_snapshot_with_guard_release(guard);
     }
 
     pub fn set_model_registry_values(&self, values: HashMap<String, String>) {
-        let mut guard = self.inner.lock().expect("lock error");
+        let mut guard = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         guard.model_registry_values = values;
         guard.ctx_generation = guard.ctx_generation.wrapping_add(1);
         self.refresh_snapshot_with_guard_release(guard);
@@ -26487,12 +26487,12 @@ impl ExtensionManager {
     }
 
     pub fn set_host_actions(&self, actions: Arc<dyn ExtensionHostActions>) {
-        let mut guard = self.inner.lock().expect("lock error");
+        let mut guard = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         guard.host_actions = Some(actions);
     }
 
     pub fn runtime(&self) -> Option<ExtensionRuntimeHandle> {
-        let guard = self.inner.lock().expect("lock error");
+        let guard = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         guard.runtime.clone()
     }
 
@@ -26511,7 +26511,7 @@ impl ExtensionManager {
     }
 
     fn host_actions(&self) -> Option<Arc<dyn ExtensionHostActions>> {
-        let guard = self.inner.lock().expect("lock error");
+        let guard = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         guard.host_actions.clone()
     }
 
@@ -26522,7 +26522,7 @@ impl ExtensionManager {
         capability: &str,
     ) -> Option<bool> {
         let (decision, extension_version) = {
-            let guard = self.inner.lock().expect("lock error");
+            let guard = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             let decision = guard
                 .policy_prompt_cache
                 .get(extension_id)
@@ -26552,7 +26552,7 @@ impl ExtensionManager {
     }
 
     pub fn cache_policy_prompt_decision(&self, extension_id: &str, capability: &str, allow: bool) {
-        let mut guard = self.inner.lock().expect("lock error");
+        let mut guard = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
 
         let version_range = guard
             .extensions
@@ -26589,7 +26589,7 @@ impl ExtensionManager {
 
     /// Revoke all persisted permission decisions for an extension.
     pub fn revoke_extension_permissions(&self, extension_id: &str) {
-        let mut guard = self.inner.lock().expect("lock error");
+        let mut guard = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         guard.policy_prompt_cache.remove(extension_id);
         if let Some(ref mut store) = guard.permission_store {
             if let Err(e) = store.revoke_extension(extension_id) {
@@ -26600,7 +26600,7 @@ impl ExtensionManager {
 
     /// Reset all persisted permission decisions.
     pub fn reset_all_permissions(&self) {
-        let mut guard = self.inner.lock().expect("lock error");
+        let mut guard = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         guard.policy_prompt_cache.clear();
         if let Some(ref mut store) = guard.permission_store {
             if let Err(e) = store.reset() {
@@ -26611,7 +26611,7 @@ impl ExtensionManager {
 
     /// List all persisted permission decisions.
     pub fn list_permissions(&self) -> HashMap<String, HashMap<String, PersistedDecision>> {
-        let guard = self.inner.lock().expect("lock error");
+        let guard = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         guard.policy_prompt_cache.clone()
     }
 
@@ -26698,7 +26698,7 @@ impl ExtensionManager {
         }
 
         {
-            let mut guard = self.inner.lock().expect("lock error");
+            let mut guard = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             guard.extensions = payloads;
             guard.active_tools = active_tools;
             guard.providers = all_providers;
@@ -26792,7 +26792,7 @@ impl ExtensionManager {
         }
 
         {
-            let mut guard = self.inner.lock().expect("lock error");
+            let mut guard = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             guard.extensions = payloads;
             guard.active_tools = active_tools;
             guard.providers = all_providers;
@@ -26854,7 +26854,7 @@ impl ExtensionManager {
         }
 
         {
-            let mut guard = self.inner.lock().expect("lock error");
+            let mut guard = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             guard.extensions.extend(registrations);
             guard.wasm_extensions.extend(wasm_handles);
             drop(guard);
@@ -26864,13 +26864,13 @@ impl ExtensionManager {
 
     #[cfg(feature = "wasm-host")]
     pub fn wasm_extensions(&self) -> Vec<WasmExtensionHandle> {
-        let guard = self.inner.lock().expect("lock error");
+        let guard = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         guard.wasm_extensions.clone()
     }
 
     #[allow(clippy::significant_drop_tightening)]
     pub fn set_session(&self, session: Arc<dyn ExtensionSession>) {
-        let mut guard = self.inner.lock().expect("lock error");
+        let mut guard = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         guard.session = Some(session);
         guard.ctx_generation = guard.ctx_generation.wrapping_add(1);
         self.refresh_snapshot_with_guard_release(guard);
@@ -26883,7 +26883,7 @@ impl ExtensionManager {
 
     #[allow(clippy::significant_drop_tightening)]
     pub fn set_active_tools(&self, tools: Vec<String>) {
-        let mut guard = self.inner.lock().expect("lock error");
+        let mut guard = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         guard.active_tools = Some(tools);
         self.refresh_snapshot_with_guard_release(guard);
     }
@@ -26896,7 +26896,7 @@ impl ExtensionManager {
 
     #[allow(clippy::significant_drop_tightening)]
     pub fn set_current_model(&self, provider: Option<String>, model_id: Option<String>) {
-        let mut guard = self.inner.lock().expect("lock error");
+        let mut guard = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         guard.current_provider = provider;
         guard.current_model_id = model_id;
         guard.ctx_generation = guard.ctx_generation.wrapping_add(1);
@@ -26909,7 +26909,7 @@ impl ExtensionManager {
     }
 
     pub fn set_current_thinking_level(&self, level: Option<String>) {
-        let mut guard = self.inner.lock().expect("lock error");
+        let mut guard = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         guard.current_thinking_level = level;
         guard.ctx_generation = guard.ctx_generation.wrapping_add(1);
         self.refresh_snapshot_with_guard_release(guard);
@@ -26923,7 +26923,7 @@ impl ExtensionManager {
     }
 
     pub fn register(&self, payload: RegisterPayload) {
-        let mut guard = self.inner.lock().expect("lock error");
+        let mut guard = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         // Update the hook bitmap with any new event hooks.
         for hook in &payload.event_hooks {
             guard.hook_bitmap.insert(hook.clone());
@@ -26939,7 +26939,7 @@ impl ExtensionManager {
 
     /// Dynamically register a slash command at runtime (from a hostcall).
     pub fn register_command(&self, name: &str, description: Option<&str>) {
-        let mut guard = self.inner.lock().expect("lock error");
+        let mut guard = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let entry = json!({
             "name": name,
             "description": description,
@@ -26965,14 +26965,14 @@ impl ExtensionManager {
 
     /// Dynamically register a provider at runtime (from a hostcall).
     pub fn register_provider(&self, payload: Value) {
-        let mut guard = self.inner.lock().expect("lock error");
+        let mut guard = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         guard.providers.push(payload);
         self.refresh_snapshot_with_guard_release(guard);
     }
 
     /// Dynamically register a flag at runtime (from a hostcall).
     pub fn register_flag(&self, spec: Value) {
-        let mut guard = self.inner.lock().expect("lock error");
+        let mut guard = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let name = spec.get("name").and_then(Value::as_str).unwrap_or_default();
         // Deduplicate: replace existing flag with the same name.
         guard
@@ -27017,7 +27017,7 @@ impl ExtensionManager {
             return false;
         }
 
-        let guard = self.inner.lock().expect("lock error");
+        let guard = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         guard.providers.iter().any(|provider_spec| {
             provider_spec
                 .get("id")
@@ -27258,7 +27258,7 @@ impl ExtensionManager {
         }
 
         let (ui_sender, expects_response) = {
-            let guard = self.inner.lock().expect("lock error");
+            let guard = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             (guard.ui_sender.clone(), request.expects_response())
         };
 
@@ -27276,14 +27276,14 @@ impl ExtensionManager {
 
         let (tx, rx) = oneshot::channel();
         {
-            let mut guard = self.inner.lock().expect("lock error");
+            let mut guard = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             guard.pending_ui.insert(request.id.clone(), tx);
         }
 
         if ui_sender.send(&cx, request.clone()).await.is_err() {
             self.inner
                 .lock()
-                .expect("lock error")
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .pending_ui
                 .remove(&request.id);
             return Err(Error::extension("Extension UI channel closed"));
@@ -27306,7 +27306,7 @@ impl ExtensionManager {
             Err(err) => {
                 self.inner
                     .lock()
-                    .expect("lock error")
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .pending_ui
                     .remove(&request.id);
                 Err(err)
@@ -27317,7 +27317,7 @@ impl ExtensionManager {
     pub fn respond_ui(&self, response: ExtensionUiResponse) -> bool {
         let cx = Cx::for_request();
         let tx = {
-            let mut guard = self.inner.lock().expect("lock error");
+            let mut guard = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             guard.pending_ui.remove(&response.id)
         };
         tx.is_some_and(|sender| sender.send(&cx, response).is_ok())
@@ -27377,7 +27377,7 @@ impl ExtensionManager {
 
         // Check cache under a brief mutex lock (Arc clone = atomic increment).
         let cached = {
-            let guard = self.inner.lock().expect("lock error");
+            let guard = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             guard.ctx_cache.clone()
         };
 
@@ -27404,7 +27404,7 @@ impl ExtensionManager {
         // between our snapshot and now, the cache will simply be stale and
         // rebuilt on the next call).
         {
-            let mut guard = self.inner.lock().expect("lock error");
+            let mut guard = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             // Only store if our generation is still current.
             if guard.ctx_generation == version {
                 guard.ctx_cache = Some(CachedEventContext {
@@ -27433,7 +27433,7 @@ impl ExtensionManager {
         let has_hook = snap.hook_bitmap.contains(&event_name);
         drop(snap);
         let runtime = if has_hook {
-            let guard = self.inner.lock().expect("lock error");
+            let guard = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             guard.runtime.clone()
         } else {
             None
@@ -27441,7 +27441,7 @@ impl ExtensionManager {
 
         #[cfg(feature = "wasm-host")]
         let (wasm_extensions, has_hook_wasm) = {
-            let guard = self.inner.lock().expect("lock error");
+            let guard = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             let has_hook_wasm = guard
                 .wasm_extensions
                 .iter()
@@ -27636,7 +27636,7 @@ impl ExtensionManager {
         let runtime = if filtered_events.is_empty() {
             None
         } else {
-            let guard = self.inner.lock().expect("lock error");
+            let guard = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             guard.runtime.clone()
         };
 
@@ -27674,14 +27674,14 @@ impl ExtensionManager {
         let event_name = "tool_call";
         // O(1) hook bitmap check.
         let (runtime, has_hook_js) = {
-            let guard = self.inner.lock().expect("lock error");
+            let guard = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             let has_hook = guard.hook_bitmap.contains(event_name);
             (guard.runtime.clone(), has_hook)
         };
 
         #[cfg(feature = "wasm-host")]
         let (wasm_extensions, has_hook_wasm) = {
-            let guard = self.inner.lock().expect("lock error");
+            let guard = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             let has_hook_wasm = guard
                 .wasm_extensions
                 .iter()
@@ -27779,14 +27779,14 @@ impl ExtensionManager {
 
         // O(1) hook bitmap check.
         let (runtime, has_hook_js) = {
-            let guard = self.inner.lock().expect("lock error");
+            let guard = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             let has_hook = guard.hook_bitmap.contains(event_name);
             (guard.runtime.clone(), has_hook)
         };
 
         #[cfg(feature = "wasm-host")]
         let (wasm_extensions, has_hook_wasm) = {
-            let guard = self.inner.lock().expect("lock error");
+            let guard = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             let has_hook_wasm = guard
                 .wasm_extensions
                 .iter()
@@ -27872,7 +27872,7 @@ impl ExtensionManager {
     /// Call this when session content changes outside the normal setter flow
     /// (e.g. after appending messages to a session).
     pub fn invalidate_ctx_cache(&self) {
-        let mut guard = self.inner.lock().expect("lock error");
+        let mut guard = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         guard.ctx_generation = guard.ctx_generation.wrapping_add(1);
         self.refresh_snapshot_with_guard_release(guard);
     }
@@ -28054,7 +28054,7 @@ impl EventCoalescer {
         if !is_coalescable_event(&event) {
             // Non-coalescable: buffer for batch dispatch.
             {
-                let mut buf = self.batch_buffer.lock().expect("lock error");
+                let mut buf = self.batch_buffer.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 buf.push((event, data));
             }
 
@@ -28071,7 +28071,7 @@ impl EventCoalescer {
                         // Drain the buffer; events that arrived between scheduling
                         // and execution are included in this batch.
                         let raw = {
-                            let mut buf = buffer.lock().expect("lock error");
+                            let mut buf = buffer.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                             std::mem::take(&mut *buf)
                         };
 
@@ -28080,7 +28080,7 @@ impl EventCoalescer {
                             // a race where producers appended while the flag was still true.
                             flag.store(false, std::sync::atomic::Ordering::Release);
                             let should_continue = {
-                                if buffer.lock().expect("lock error").is_empty() {
+                                if buffer.lock().unwrap_or_else(std::sync::PoisonError::into_inner).is_empty() {
                                     false
                                 } else {
                                     !flag.swap(true, std::sync::atomic::Ordering::AcqRel)
@@ -28106,12 +28106,12 @@ impl EventCoalescer {
 
         // Coalescable path: check if a dispatch is already in-flight.
         {
-            let mut in_flight = self.in_flight.lock().expect("lock error");
+            let mut in_flight = self.in_flight.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             if in_flight.contains(&event_name_str) {
                 // Replace pending payload; the in-flight task will pick it up.
                 self.pending
                     .lock()
-                    .expect("lock error")
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .insert(event_name_str, data);
                 return;
             }
@@ -28136,7 +28136,7 @@ impl EventCoalescer {
                     _ => {
                         in_flight
                             .lock()
-                            .expect("lock error")
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
                             .remove(&event_name_owned);
                         break;
                     }
@@ -28147,7 +28147,7 @@ impl EventCoalescer {
 
                 // Fast path: drain pending replacement payload if present.
                 if let Some(new_data) = {
-                    let mut p = pending.lock().expect("lock error");
+                    let mut p = pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                     p.remove(&event_name_owned)
                 } {
                     next_payload = Some(new_data);
@@ -28157,8 +28157,8 @@ impl EventCoalescer {
                 // Hand off atomically with writers (which lock in_flight then pending)
                 // so we don't strand a payload that arrives right before completion.
                 let maybe_new_data = {
-                    let mut f = in_flight.lock().expect("lock error");
-                    let mut p = pending.lock().expect("lock error");
+                    let mut f = in_flight.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let mut p = pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                     p.remove(&event_name_owned).or_else(|| {
                         f.remove(&event_name_owned);
                         None
@@ -32403,7 +32403,7 @@ mod tests {
             let manager = ExtensionManager::new();
             let tools = crate::tools::ToolRegistry::new(&["read"], Path::new("."), None);
 
-            let gen_before = manager.inner.lock().expect("lock error").ctx_generation;
+            let gen_before = manager.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner).ctx_generation;
             let outcome = dispatch_hostcall_events(
                 "call-1",
                 &manager,
@@ -32414,7 +32414,7 @@ mod tests {
             .await;
             assert!(matches!(outcome, HostcallOutcome::Success(_)));
 
-            let gen_after = manager.inner.lock().expect("lock error").ctx_generation;
+            let gen_after = manager.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner).ctx_generation;
             assert_eq!(gen_after, gen_before + 1);
         });
     }
@@ -32501,7 +32501,7 @@ mod tests {
             let manager = ExtensionManager::new();
             let tools = crate::tools::ToolRegistry::new(&["read"], Path::new("."), None);
 
-            let gen_before = manager.inner.lock().expect("lock error").ctx_generation;
+            let gen_before = manager.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner).ctx_generation;
             let outcome = dispatch_hostcall_events(
                 "call-1",
                 &manager,
@@ -32512,7 +32512,7 @@ mod tests {
             .await;
             assert!(matches!(outcome, HostcallOutcome::Success(_)));
 
-            let gen_after = manager.inner.lock().expect("lock error").ctx_generation;
+            let gen_after = manager.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner).ctx_generation;
             assert_eq!(gen_after, gen_before + 1);
         });
     }
@@ -32595,7 +32595,7 @@ mod tests {
     #[async_trait]
     impl ExtensionSession for MockSession {
         async fn get_state(&self) -> Value {
-            let name = self.name.lock().expect("lock error").clone();
+            let name = self.name.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
             json!({ "sessionName": name })
         }
         async fn get_messages(&self) -> Vec<crate::session::SessionMessage> {
@@ -32608,7 +32608,7 @@ mod tests {
             Vec::new()
         }
         async fn set_name(&self, name: String) -> Result<()> {
-            *self.name.lock().expect("lock error") = Some(name);
+            *self.name.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(name);
             Ok(())
         }
         async fn append_message(&self, _message: crate::session::SessionMessage) -> Result<()> {
@@ -32622,23 +32622,23 @@ mod tests {
             Ok(())
         }
         async fn set_model(&self, provider: String, model_id: String) -> Result<()> {
-            *self.model.lock().expect("lock error") = (Some(provider), Some(model_id));
+            *self.model.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = (Some(provider), Some(model_id));
             Ok(())
         }
         async fn get_model(&self) -> (Option<String>, Option<String>) {
-            self.model.lock().expect("lock error").clone()
+            self.model.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
         }
         async fn set_thinking_level(&self, level: String) -> Result<()> {
-            *self.thinking_level.lock().expect("lock error") = Some(level);
+            *self.thinking_level.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(level);
             Ok(())
         }
         async fn get_thinking_level(&self) -> Option<String> {
-            self.thinking_level.lock().expect("lock error").clone()
+            self.thinking_level.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
         }
         async fn set_label(&self, target_id: String, label: Option<String>) -> Result<()> {
             self.labels
                 .lock()
-                .expect("lock error")
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .push((target_id, label));
             Ok(())
         }
@@ -32690,7 +32690,7 @@ mod tests {
             let session = Arc::new(MockSession::new());
             manager.set_session(session.clone());
 
-            let gen_before = manager.inner.lock().expect("lock error").ctx_generation;
+            let gen_before = manager.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner).ctx_generation;
             let outcome = dispatch_hostcall_session(
                 "call-1",
                 &manager,
@@ -32700,7 +32700,7 @@ mod tests {
             .await;
             assert!(matches!(outcome, HostcallOutcome::Success(_)));
 
-            let gen_after = manager.inner.lock().expect("lock error").ctx_generation;
+            let gen_after = manager.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner).ctx_generation;
             assert_eq!(gen_after, gen_before + 1);
         });
     }
@@ -32722,7 +32722,7 @@ mod tests {
             assert!(matches!(outcome, HostcallOutcome::Success(_)));
 
             {
-                let labels = session.labels.lock().expect("lock error");
+                let labels = session.labels.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 assert_eq!(labels.len(), 1);
                 assert_eq!(labels[0].0, "entry-42");
                 assert_eq!(labels[0].1.as_deref(), Some("important"));
@@ -32762,7 +32762,7 @@ mod tests {
             let session = Arc::new(MockSession::new());
             manager.set_session(session.clone());
 
-            let gen_before = manager.inner.lock().expect("lock error").ctx_generation;
+            let gen_before = manager.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner).ctx_generation;
             let outcome = dispatch_hostcall_session(
                 "call-append-msg",
                 &manager,
@@ -32777,7 +32777,7 @@ mod tests {
             .await;
             assert!(matches!(outcome, HostcallOutcome::Success(_)));
 
-            let gen_after = manager.inner.lock().expect("lock error").ctx_generation;
+            let gen_after = manager.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner).ctx_generation;
             assert_eq!(gen_after, gen_before + 1);
         });
     }
@@ -32789,7 +32789,7 @@ mod tests {
             let session = Arc::new(MockSession::new());
             manager.set_session(session.clone());
 
-            let gen_before = manager.inner.lock().expect("lock error").ctx_generation;
+            let gen_before = manager.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner).ctx_generation;
             let outcome = dispatch_hostcall_session(
                 "call-set-model",
                 &manager,
@@ -32802,7 +32802,7 @@ mod tests {
             .await;
             assert!(matches!(outcome, HostcallOutcome::Success(_)));
 
-            let gen_after = manager.inner.lock().expect("lock error").ctx_generation;
+            let gen_after = manager.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner).ctx_generation;
             assert_eq!(gen_after, gen_before + 1);
         });
     }
@@ -32814,7 +32814,7 @@ mod tests {
             let session = Arc::new(MockSession::new());
             manager.set_session(session.clone());
 
-            let gen_before = manager.inner.lock().expect("lock error").ctx_generation;
+            let gen_before = manager.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner).ctx_generation;
             let outcome = dispatch_hostcall_session(
                 "call-set-thinking",
                 &manager,
@@ -32824,7 +32824,7 @@ mod tests {
             .await;
             assert!(matches!(outcome, HostcallOutcome::Success(_)));
 
-            let gen_after = manager.inner.lock().expect("lock error").ctx_generation;
+            let gen_after = manager.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner).ctx_generation;
             assert_eq!(gen_after, gen_before + 1);
         });
     }
@@ -32836,7 +32836,7 @@ mod tests {
             let session = Arc::new(MockSession::new());
             manager.set_session(session.clone());
 
-            let gen_before = manager.inner.lock().expect("lock error").ctx_generation;
+            let gen_before = manager.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner).ctx_generation;
             let outcome = dispatch_hostcall_session(
                 "call-set-label",
                 &manager,
@@ -32849,7 +32849,7 @@ mod tests {
             .await;
             assert!(matches!(outcome, HostcallOutcome::Success(_)));
 
-            let gen_after = manager.inner.lock().expect("lock error").ctx_generation;
+            let gen_after = manager.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner).ctx_generation;
             assert_eq!(gen_after, gen_before + 1);
         });
     }
@@ -32890,7 +32890,7 @@ mod tests {
             assert!(matches!(outcome, HostcallOutcome::Success(_)));
 
             {
-                let labels = session.labels.lock().expect("lock error");
+                let labels = session.labels.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 assert_eq!(labels.len(), 1);
                 assert_eq!(labels[0].0, "entry-99");
                 assert!(labels[0].1.is_none());
@@ -32929,7 +32929,7 @@ mod tests {
             .await;
 
             // Verify session was updated.
-            let (provider, model_id) = session.model.lock().expect("lock error").clone();
+            let (provider, model_id) = session.model.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
             assert_eq!(provider.as_deref(), Some("anthropic"));
             assert_eq!(model_id.as_deref(), Some("claude-opus-4-5-20251101"));
 
@@ -32981,7 +32981,7 @@ mod tests {
             .await;
 
             // Verify session was updated.
-            let level = session.thinking_level.lock().expect("lock error").clone();
+            let level = session.thinking_level.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
             assert_eq!(level.as_deref(), Some("low"));
 
             // getThinkingLevel via events should read from session.
@@ -33031,11 +33031,11 @@ mod tests {
     #[async_trait]
     impl ExtensionHostActions for MockHostActions {
         async fn send_message(&self, message: ExtensionSendMessage) -> Result<()> {
-            self.messages.lock().expect("lock error").push(message);
+            self.messages.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(message);
             Ok(())
         }
         async fn send_user_message(&self, message: ExtensionSendUserMessage) -> Result<()> {
-            self.user_messages.lock().expect("lock error").push(message);
+            self.user_messages.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(message);
             Ok(())
         }
     }
@@ -33074,7 +33074,7 @@ mod tests {
 
             assert!(matches!(outcome, HostcallOutcome::Success(_)));
             {
-                let msgs = actions.messages.lock().expect("lock error");
+                let msgs = actions.messages.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 assert_eq!(msgs.len(), 1);
                 assert_eq!(msgs[0].custom_type, "status-update");
                 assert_eq!(msgs[0].content, "Deployment succeeded");
@@ -33109,7 +33109,7 @@ mod tests {
 
             assert!(matches!(outcome, HostcallOutcome::Error { .. }));
             // No message should have been dispatched.
-            assert!(actions.messages.lock().expect("lock error").is_empty());
+            assert!(actions.messages.lock().unwrap_or_else(std::sync::PoisonError::into_inner).is_empty());
         });
     }
 
@@ -33165,7 +33165,7 @@ mod tests {
 
             assert!(matches!(outcome, HostcallOutcome::Success(_)));
             {
-                let msgs = actions.user_messages.lock().expect("lock error");
+                let msgs = actions.user_messages.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 assert_eq!(msgs.len(), 1);
                 assert_eq!(msgs[0].text, "Please review the PR");
                 drop(msgs);
@@ -33196,7 +33196,7 @@ mod tests {
             .await;
 
             assert!(matches!(outcome, HostcallOutcome::Success(_)));
-            let msgs = actions.user_messages.lock().expect("lock error");
+            let msgs = actions.user_messages.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             assert_eq!(msgs.len(), 1);
             assert_eq!(msgs[0].text, "Please review the PR");
             drop(msgs);
@@ -33222,7 +33222,7 @@ mod tests {
 
             // Empty text returns Success(null) without dispatching.
             assert!(matches!(outcome, HostcallOutcome::Success(_)));
-            assert!(actions.user_messages.lock().expect("lock error").is_empty());
+            assert!(actions.user_messages.lock().unwrap_or_else(std::sync::PoisonError::into_inner).is_empty());
         });
     }
 
@@ -33259,7 +33259,7 @@ mod tests {
             let session = Arc::new(MockSession::new());
             manager.set_session(session.clone());
 
-            let gen_before = manager.inner.lock().expect("lock error").ctx_generation;
+            let gen_before = manager.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner).ctx_generation;
             let outcome = dispatch_hostcall_session(
                 "call-1",
                 &manager,
@@ -33272,7 +33272,7 @@ mod tests {
             .await;
             assert!(matches!(outcome, HostcallOutcome::Success(_)));
 
-            let gen_after = manager.inner.lock().expect("lock error").ctx_generation;
+            let gen_after = manager.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner).ctx_generation;
             assert_eq!(gen_after, gen_before + 1);
         });
     }
@@ -33309,7 +33309,7 @@ mod tests {
             let session = Arc::new(MockSession::new());
             manager.set_session(session.clone());
 
-            let gen_before = manager.inner.lock().expect("lock error").ctx_generation;
+            let gen_before = manager.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner).ctx_generation;
             let outcome = dispatch_hostcall_events(
                 "call-1",
                 &manager,
@@ -33323,7 +33323,7 @@ mod tests {
             .await;
             assert!(matches!(outcome, HostcallOutcome::Success(_)));
 
-            let gen_after = manager.inner.lock().expect("lock error").ctx_generation;
+            let gen_after = manager.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner).ctx_generation;
             assert_eq!(gen_after, gen_before + 1);
         });
     }
@@ -33995,7 +33995,7 @@ mod tests {
                 .create_task(root, Budget::INFINITE, async move {
                     let cx = Cx::current().expect("cx");
                     if let Ok(val) = rx.recv(&cx).await {
-                        *received_clone.lock().expect("lock error") = Some(val);
+                        *received_clone.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(val);
                     }
                 })
                 .expect("create recv task");
@@ -34003,7 +34003,7 @@ mod tests {
 
             runtime.run_until_quiescent();
 
-            let val = received.lock().expect("lock error").take();
+            let val = received.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
             assert_eq!(val.as_deref(), Some("hello"));
         }
 
@@ -34068,14 +34068,14 @@ mod tests {
                             let (tx, rx) = oneshot::channel::<u32>();
                             tx.send(&cx, i).expect("send");
                             let val = rx.recv(&cx).await.expect("recv");
-                            log.lock().expect("lock error").push(format!("task-{val}"));
+                            log.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(format!("task-{val}"));
                         })
                         .expect("create task");
                     runtime.scheduler.lock().schedule(task_id, 0);
                 }
 
                 runtime.run_until_quiescent();
-                log.lock().expect("lock error").clone()
+                log.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
             }
 
             let run_a = run_once(0xCAFE);
@@ -34101,14 +34101,14 @@ mod tests {
                         .create_task(root, Budget::INFINITE, async move {
                             // Yield to interleave with other tasks.
                             asupersync::runtime::yield_now().await;
-                            log.lock().expect("lock error").push(format!("w-{i}"));
+                            log.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(format!("w-{i}"));
                         })
                         .expect("create task");
                     runtime.scheduler.lock().schedule(task_id, 0);
                 }
 
                 runtime.run_until_quiescent();
-                log.lock().expect("lock error").clone()
+                log.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
             }
 
             let run_a = run_multi(0xF00D);
@@ -34714,7 +34714,7 @@ mod tests {
                         matches!(outcome, HostcallOutcome::Error { .. }),
                         "sendMessage without customType should error, got: {outcome:?}"
                     );
-                    assert_eq!(actions.messages.lock().expect("lock error").len(), 0);
+                    assert_eq!(actions.messages.lock().unwrap_or_else(std::sync::PoisonError::into_inner).len(), 0);
                 });
             }
 
@@ -48149,52 +48149,52 @@ mod tests {
     #[test]
     fn ctx_generation_increments_on_cwd_change() {
         let mgr = ExtensionManager::new();
-        let gen_before = mgr.inner.lock().expect("lock error").ctx_generation;
+        let gen_before = mgr.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner).ctx_generation;
         mgr.set_cwd("/tmp/test".to_string());
-        let gen_after = mgr.inner.lock().expect("lock error").ctx_generation;
+        let gen_after = mgr.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner).ctx_generation;
         assert_eq!(gen_after, gen_before + 1);
     }
 
     #[test]
     fn ctx_generation_increments_on_session_set() {
         let mgr = ExtensionManager::new();
-        let gen_before = mgr.inner.lock().expect("lock error").ctx_generation;
+        let gen_before = mgr.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner).ctx_generation;
         mgr.set_session(Arc::new(TestNullSession));
-        let gen_after = mgr.inner.lock().expect("lock error").ctx_generation;
+        let gen_after = mgr.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner).ctx_generation;
         assert_eq!(gen_after, gen_before + 1);
     }
 
     #[test]
     fn ctx_generation_increments_on_model_change() {
         let mgr = ExtensionManager::new();
-        let gen_before = mgr.inner.lock().expect("lock error").ctx_generation;
+        let gen_before = mgr.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner).ctx_generation;
         mgr.set_current_model(Some("anthropic".to_string()), Some("claude-3".to_string()));
-        let gen_after = mgr.inner.lock().expect("lock error").ctx_generation;
+        let gen_after = mgr.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner).ctx_generation;
         assert_eq!(gen_after, gen_before + 1);
     }
 
     #[test]
     fn ctx_generation_increments_on_thinking_level_change() {
         let mgr = ExtensionManager::new();
-        let gen_before = mgr.inner.lock().expect("lock error").ctx_generation;
+        let gen_before = mgr.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner).ctx_generation;
         mgr.set_current_thinking_level(Some("high".to_string()));
-        let gen_after = mgr.inner.lock().expect("lock error").ctx_generation;
+        let gen_after = mgr.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner).ctx_generation;
         assert_eq!(gen_after, gen_before + 1);
     }
 
     #[test]
     fn invalidate_ctx_cache_bumps_generation() {
         let mgr = ExtensionManager::new();
-        let gen_before = mgr.inner.lock().expect("lock error").ctx_generation;
+        let gen_before = mgr.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner).ctx_generation;
         mgr.invalidate_ctx_cache();
-        let gen_after = mgr.inner.lock().expect("lock error").ctx_generation;
+        let gen_after = mgr.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner).ctx_generation;
         assert_eq!(gen_after, gen_before + 1);
     }
 
     #[test]
     fn ctx_cache_initially_none() {
         let mgr = ExtensionManager::new();
-        let guard = mgr.inner.lock().expect("lock error");
+        let guard = mgr.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         assert!(guard.ctx_cache.is_none());
         drop(guard);
     }
@@ -48227,8 +48227,8 @@ mod tests {
         // No extensions registered → no hooks → dispatch should be a no-op.
         let coalescer = EventCoalescer::new(mgr);
         // Verify in_flight and pending are empty.
-        assert!(coalescer.in_flight.lock().expect("lock error").is_empty());
-        assert!(coalescer.pending.lock().expect("lock error").is_empty());
+        assert!(coalescer.in_flight.lock().unwrap_or_else(std::sync::PoisonError::into_inner).is_empty());
+        assert!(coalescer.pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner).is_empty());
     }
 
     #[test]
