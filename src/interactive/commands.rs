@@ -1763,8 +1763,7 @@ result in account suspension/ban. Prefer using an Anthropic API key (ANTHROPIC_A
                         // Block until the callback arrives or the sender is dropped.
                         if let Ok(path) = server.rx.recv() {
                             let full_url = format!("http://localhost{path}");
-                            let _ =
-                                event_tx.try_send(PiMsg::OAuthCallbackReceived(full_url));
+                            let _ = event_tx.try_send(PiMsg::OAuthCallbackReceived(full_url));
                         }
                     });
                 }

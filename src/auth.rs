@@ -1564,9 +1564,8 @@ pub fn start_oauth_callback_server(redirect_uri: &str) -> Result<OAuthCallbackSe
 
         // Read the HTTP request (we only need the first line: `GET /path?query HTTP/1.1`).
         let mut buf = [0u8; 4096];
-        let n = match stream.read(&mut buf) {
-            Ok(n) => n,
-            Err(_) => return,
+        let Ok(n) = stream.read(&mut buf) else {
+            return;
         };
 
         let request = String::from_utf8_lossy(&buf[..n]);

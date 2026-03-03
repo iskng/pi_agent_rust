@@ -24247,7 +24247,11 @@ impl ExtensionManager {
     }
 
     pub fn runtime_risk_config(&self) -> RuntimeRiskConfig {
-        self.inner.lock().expect("lock error").runtime_risk_config.clone()
+        self.inner
+            .lock()
+            .expect("lock error")
+            .runtime_risk_config
+            .clone()
     }
 
     // ── SEC-7.2: Graduated enforcement rollout ──────────────────────────
@@ -27277,7 +27281,11 @@ impl ExtensionManager {
         }
 
         if ui_sender.send(&cx, request.clone()).await.is_err() {
-            self.inner.lock().expect("lock error").pending_ui.remove(&request.id);
+            self.inner
+                .lock()
+                .expect("lock error")
+                .pending_ui
+                .remove(&request.id);
             return Err(Error::extension("Extension UI channel closed"));
         }
 
@@ -27296,7 +27304,11 @@ impl ExtensionManager {
         match response {
             Ok(resp) => Ok(Some(resp)),
             Err(err) => {
-                self.inner.lock().expect("lock error").pending_ui.remove(&request.id);
+                self.inner
+                    .lock()
+                    .expect("lock error")
+                    .pending_ui
+                    .remove(&request.id);
                 Err(err)
             }
         }
@@ -28025,6 +28037,7 @@ impl EventCoalescer {
     /// drain task that dispatches all buffered events in a single JS bridge
     /// call.  This saves ~21µs of fixed overhead per additional event in the
     /// batch.
+    #[allow(clippy::too_many_lines)]
     fn dispatch_fire_and_forget(
         &self,
         event: ExtensionEventName,
@@ -28096,7 +28109,10 @@ impl EventCoalescer {
             let mut in_flight = self.in_flight.lock().expect("lock error");
             if in_flight.contains(&event_name_str) {
                 // Replace pending payload; the in-flight task will pick it up.
-                self.pending.lock().expect("lock error").insert(event_name_str, data);
+                self.pending
+                    .lock()
+                    .expect("lock error")
+                    .insert(event_name_str, data);
                 return;
             }
             in_flight.insert(event_name_str.clone());
@@ -28118,7 +28134,10 @@ impl EventCoalescer {
                     "message_update" => ExtensionEventName::MessageUpdate,
                     "tool_execution_update" => ExtensionEventName::ToolExecutionUpdate,
                     _ => {
-                        in_flight.lock().expect("lock error").remove(&event_name_owned);
+                        in_flight
+                            .lock()
+                            .expect("lock error")
+                            .remove(&event_name_owned);
                         break;
                     }
                 };
@@ -32617,7 +32636,10 @@ mod tests {
             self.thinking_level.lock().expect("lock error").clone()
         }
         async fn set_label(&self, target_id: String, label: Option<String>) -> Result<()> {
-            self.labels.lock().expect("lock error").push((target_id, label));
+            self.labels
+                .lock()
+                .expect("lock error")
+                .push((target_id, label));
             Ok(())
         }
     }

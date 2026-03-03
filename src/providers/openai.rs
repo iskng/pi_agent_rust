@@ -33,13 +33,12 @@ const DEFAULT_MAX_TOKENS: u32 = 4096;
 const OPENROUTER_DEFAULT_HTTP_REFERER: &str = "https://github.com/Dicklesworthstone/pi_agent_rust";
 const OPENROUTER_DEFAULT_X_TITLE: &str = "Pi Agent Rust";
 
-/// Map a role string (which may come from compat config at runtime) to a `&'static str`.
+/// Map a role string (which may come from compat config at runtime) to a `Cow<'_, str>`.
 ///
 /// The OpenAI API uses a small, well-known set of role names.  When the value
 /// matches one of these we return the corresponding string literal (zero
 /// allocation).  For an unknown role name (extremely rare – only possible via
-/// exotic compat overrides) we leak a heap copy so that callers can always
-/// work with `&'static str`.
+/// exotic compat overrides) we return an owned String.
 fn to_cow_role(role: &str) -> Cow<'_, str> {
     match role {
         "system" => Cow::Borrowed("system"),

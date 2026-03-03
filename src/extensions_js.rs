@@ -4723,6 +4723,8 @@ struct PiJsModuleState {
     /// Extension root directories used to detect monorepo escape (Pattern 3).
     /// Populated as extensions are loaded via [`PiJsRuntime::add_extension_root`].
     extension_roots: Vec<PathBuf>,
+    /// Pre-canonicalized extension roots to avoid doing filesystem IO during import resolution.
+    canonical_extension_roots: Vec<PathBuf>,
     /// Source-tier classification per extension root. Used by Pattern 4 to
     /// avoid proxy stubs for official/first-party extensions.
     extension_root_tiers: HashMap<PathBuf, ProxyStubSourceTier>,
@@ -4766,6 +4768,7 @@ impl PiJsModuleState {
             module_cache_counters: ModuleCacheCounters::default(),
             repair_mode: RepairMode::default(),
             extension_roots: Vec::new(),
+            canonical_extension_roots: Vec::new(),
             extension_root_tiers: HashMap::new(),
             extension_root_scopes: HashMap::new(),
             repair_events: Arc::new(std::sync::Mutex::new(Vec::new())),
@@ -5275,16 +5278,21 @@ impl JsModuleResolver for PiJsResolver {
             state.repair_mode
         };
 
-        let roots = self.state.borrow().extension_roots.clone();
-        if let Some(path) = resolve_module_path(base, spec, repair_mode, &roots) {
+        let (roots, canonical_roots) = {
+            let state = self.state.borrow();
+            (
+                state.extension_roots.clone(),
+                state.canonical_extension_roots.clone(),
+            )
+        };
+        if let Some(path) = resolve_module_path(base, spec, repair_mode, &roots, &canonical_roots) {
             // Canonicalize to collapse `.` / `..` segments and normalise
             // separators (Windows backslashes → forward slashes for QuickJS).
             let canonical = crate::extensions::safe_canonicalize(&path);
 
-            let is_safe = roots.iter().any(|root| {
-                let canonical_root = crate::extensions::safe_canonicalize(root);
-                canonical.starts_with(&canonical_root)
-            });
+            let is_safe = canonical_roots
+                .iter()
+                .any(|canonical_root| canonical.starts_with(canonical_root));
 
             if !is_safe {
                 tracing::warn!(
@@ -5758,6 +5766,7 @@ fn resolve_module_path(
     specifier: &str,
     repair_mode: RepairMode,
     roots: &[PathBuf],
+    canonical_roots: &[PathBuf],
 ) -> Option<PathBuf> {
     let specifier = specifier.trim();
     if specifier.is_empty() {
@@ -5770,9 +5779,8 @@ fn resolve_module_path(
             return None;
         }
         let canonical = crate::extensions::safe_canonicalize(&resolved);
-        let allowed = roots.iter().any(|root| {
-            let canonical_root = crate::extensions::safe_canonicalize(root);
-            canonical.starts_with(&canonical_root)
+        let allowed = canonical_roots.iter().any(|canonical_root| {
+            canonical.starts_with(canonical_root)
         });
         if !allowed {
             tracing::warn!(
@@ -5808,9 +5816,8 @@ fn resolve_module_path(
         return None;
     }
     let canonical = crate::extensions::safe_canonicalize(&path);
-    let allowed = roots.iter().any(|root| {
-        let canonical_root = crate::extensions::safe_canonicalize(root);
-        canonical.starts_with(&canonical_root)
+    let allowed = canonical_roots.iter().any(|canonical_root| {
+        canonical.starts_with(canonical_root)
     });
 
     if !allowed {
@@ -5825,9 +5832,8 @@ fn resolve_module_path(
             return None;
         }
         let canonical_resolved = crate::extensions::safe_canonicalize(&resolved);
-        let allowed = roots.iter().any(|root| {
-            let canonical_root = crate::extensions::safe_canonicalize(root);
-            canonical_resolved.starts_with(&canonical_root)
+        let allowed = canonical_roots.iter().any(|canonical_root| {
+            canonical_resolved.starts_with(canonical_root)
         });
 
         if !allowed {
@@ -13600,6 +13606,9 @@ impl<C: SchedulerClock + 'static> PiJsRuntime<C> {
         self.add_allowed_read_root(root.clone());
         let mut state = self.module_state.borrow_mut();
         if !state.extension_roots.contains(&root) {
+            state
+                .canonical_extension_roots
+                .push(crate::extensions::safe_canonicalize(&root));
             state.extension_roots.push(root.clone());
         }
 
