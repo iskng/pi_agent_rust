@@ -393,7 +393,7 @@ impl Provider for GeminiProvider {
             .ok_or_else(|| {
                 Error::provider(
                     self.name(),
-                    "Missing API key for Google/Gemini. Set GOOGLE_API_KEY or GEMINI_API_KEY.",
+                    "Missing API key for provider. Configure credentials with /login <provider> or set the provider's API key env var.",
                 )
             })?;
 

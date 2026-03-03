@@ -128,7 +128,7 @@ impl Provider for CohereProvider {
                     .api_key
                     .clone()
                     .or_else(|| std::env::var("COHERE_API_KEY").ok())
-                    .ok_or_else(|| Error::provider("cohere", "Missing API key for Cohere. Set COHERE_API_KEY or configure in settings."))?,
+                    .ok_or_else(|| Error::provider("cohere", "Missing API key for provider. Configure credentials with /login <provider> or set the provider's API key env var."))?,
             )
         };
 

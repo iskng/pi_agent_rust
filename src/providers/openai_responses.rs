@@ -221,7 +221,7 @@ impl Provider for OpenAIResponsesProvider {
                     .ok_or_else(|| {
                         Error::provider(
                             self.name(),
-                            "Missing API key for OpenAI/Codex. Set OPENAI_API_KEY or run /login.",
+                            "Missing API key for provider. Configure credentials with /login <provider> or set the provider's API key env var.",
                         )
                     })?,
             )

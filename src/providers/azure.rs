@@ -194,7 +194,7 @@ impl Provider for AzureOpenAIProvider {
             .api_key
             .clone()
             .or_else(|| std::env::var("AZURE_OPENAI_API_KEY").ok())
-            .ok_or_else(|| Error::provider("azure-openai", "Missing API key for Azure OpenAI. Set AZURE_OPENAI_API_KEY or configure in settings."))?;
+            .ok_or_else(|| Error::provider("azure-openai", "Missing API key for provider. Configure credentials with /login <provider> or set the provider's API key env var."))?;
 
         let request_body = self.build_request(context, options);
 

@@ -298,8 +298,8 @@ impl Provider for OpenAIProvider {
                     .or_else(|| std::env::var("OPENAI_API_KEY").ok())
                     .ok_or_else(|| {
                         Error::provider(
-                            &self.provider,
-                            "Missing API key for OpenAI. Set OPENAI_API_KEY or configure in settings.",
+                            self.name(),
+                            "Missing API key for provider. Configure credentials with /login <provider> or set the provider's API key env var.",
                         )
                     })?,
             )
