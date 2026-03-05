@@ -22811,6 +22811,8 @@ pub(crate) fn ui_response_value_for_op(op: &str, response: &ExtensionUiResponse)
         return match op {
             // Deterministic defaults: confirm cancellation/timeout resolves false.
             "confirm" => Value::Bool(false),
+            // Custom overlays need an explicit close payload; `null` is ignored by the JS poll loop.
+            "custom" => json!({ "closed": true }),
             _ => Value::Null,
         };
     }
@@ -37956,6 +37958,20 @@ mod tests {
                 "cancelled confirm should resolve to false"
             );
         });
+    }
+
+    #[test]
+    fn ui_response_value_for_custom_cancelled_returns_closed_payload() {
+        let response = ExtensionUiResponse {
+            id: "req-custom-cancel".to_string(),
+            value: None,
+            cancelled: true,
+        };
+
+        assert_eq!(
+            ui_response_value_for_op("custom", &response),
+            json!({ "closed": true })
+        );
     }
 
     /// UI with invalid (empty) op returns invalid_request.

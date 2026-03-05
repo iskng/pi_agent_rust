@@ -879,12 +879,10 @@ impl PiApp {
             .get("clear")
             .and_then(Value::as_bool)
             .unwrap_or(false);
-        if should_clear || lines.is_empty() {
+        if should_clear {
             self.extension_custom_overlay = None;
-            if should_clear {
-                self.extension_custom_active = false;
-                self.extension_custom_key_queue.clear();
-            }
+            self.extension_custom_active = false;
+            self.extension_custom_key_queue.clear();
             return;
         }
 
@@ -1580,6 +1578,130 @@ impl PiApp {
 #[cfg(test)]
 mod stream_delta_batcher_tests {
     use super::*;
+    use crate::agent::{Agent, AgentConfig};
+    use crate::config::Config;
+    use crate::keybindings::KeyBindings;
+    use crate::model::{StreamEvent, Usage};
+    use crate::provider::{Context, InputType, Model, ModelCost, Provider, StreamOptions};
+    use crate::resources::{ResourceCliOptions, ResourceLoader};
+    use crate::session::Session;
+    use crate::tools::ToolRegistry;
+    use asupersync::runtime::RuntimeBuilder;
+    use futures::stream;
+    use serde_json::json;
+    use std::collections::HashMap;
+    use std::path::Path;
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::sync::OnceLock;
+
+    struct DummyProvider;
+
+    #[async_trait::async_trait]
+    impl Provider for DummyProvider {
+        fn name(&self) -> &'static str {
+            "dummy"
+        }
+
+        fn api(&self) -> &'static str {
+            "dummy"
+        }
+
+        fn model_id(&self) -> &'static str {
+            "dummy-model"
+        }
+
+        async fn stream(
+            &self,
+            _context: &Context<'_>,
+            _options: &StreamOptions,
+        ) -> crate::error::Result<
+            Pin<Box<dyn futures::Stream<Item = crate::error::Result<StreamEvent>> + Send>>,
+        > {
+            Ok(Box::pin(stream::empty()))
+        }
+    }
+
+    fn runtime_handle() -> asupersync::runtime::RuntimeHandle {
+        static RT: OnceLock<asupersync::runtime::Runtime> = OnceLock::new();
+        RT.get_or_init(|| {
+            RuntimeBuilder::multi_thread()
+                .blocking_threads(1, 8)
+                .build()
+                .expect("build runtime")
+        })
+        .handle()
+    }
+
+    fn model_entry(provider: &str, id: &str) -> ModelEntry {
+        ModelEntry {
+            model: Model {
+                id: id.to_string(),
+                name: id.to_string(),
+                api: "openai-completions".to_string(),
+                provider: provider.to_string(),
+                base_url: "https://example.invalid".to_string(),
+                reasoning: true,
+                input: vec![InputType::Text],
+                cost: ModelCost {
+                    input: 0.0,
+                    output: 0.0,
+                    cache_read: 0.0,
+                    cache_write: 0.0,
+                },
+                context_window: 128_000,
+                max_tokens: 8_192,
+                headers: HashMap::new(),
+            },
+            api_key: Some("test-key".to_string()),
+            headers: HashMap::new(),
+            auth_header: true,
+            compat: None,
+            oauth_config: None,
+        }
+    }
+
+    fn build_test_app() -> PiApp {
+        let current = model_entry("openai", "gpt-4o-mini");
+        let provider: Arc<dyn Provider> = Arc::new(DummyProvider);
+        let agent = Agent::new(
+            provider,
+            ToolRegistry::new(&[], Path::new("."), None),
+            AgentConfig::default(),
+        );
+        let session = Arc::new(asupersync::sync::Mutex::new(Session::in_memory()));
+        let resources = ResourceLoader::empty(false);
+        let resource_cli = ResourceCliOptions {
+            no_skills: false,
+            no_prompt_templates: false,
+            no_extensions: false,
+            no_themes: false,
+            skill_paths: Vec::new(),
+            prompt_paths: Vec::new(),
+            extension_paths: Vec::new(),
+            theme_paths: Vec::new(),
+        };
+        let (event_tx, _event_rx) = asupersync::channel::mpsc::channel(64);
+        PiApp::new(
+            agent,
+            session,
+            Config::default(),
+            resources,
+            resource_cli,
+            Path::new(".").to_path_buf(),
+            current.clone(),
+            Vec::new(),
+            vec![current],
+            Vec::new(),
+            event_tx,
+            runtime_handle(),
+            true,
+            None,
+            Some(KeyBindings::new()),
+            Vec::new(),
+            Usage::default(),
+        )
+    }
 
     #[test]
     fn coalesces_adjacent_deltas_of_same_kind() {
@@ -1670,5 +1792,56 @@ mod stream_delta_batcher_tests {
         batcher.flush(true);
         let second = rx.try_recv().expect("expected retained agent_done event");
         assert!(matches!(second, PiMsg::AgentDone { .. }));
+    }
+
+    #[test]
+    fn empty_custom_overlay_frame_keeps_overlay_visible() {
+        let mut app = build_test_app();
+        let poll_request = ExtensionUiRequest::new(
+            "req-poll",
+            "custom",
+            json!({ "title": "Snake", "overlayOptions": { "width": "75%" } }),
+        )
+        .with_extension_id(Some("snake".to_string()));
+        app.handle_custom_extension_ui_request(poll_request);
+
+        let frame_request =
+            ExtensionUiRequest::new("req-frame", "setWidget", json!({ "title": "Snake" }))
+                .with_extension_id(Some("snake".to_string()));
+        app.apply_custom_overlay_widget_effect(&frame_request, Vec::new());
+
+        let overlay = app
+            .extension_custom_overlay
+            .as_ref()
+            .expect("empty frames should keep placeholder overlay active");
+        assert_eq!(overlay.extension_id.as_deref(), Some("snake"));
+        assert_eq!(overlay.title.as_deref(), Some("Snake"));
+        assert!(
+            overlay.lines.is_empty(),
+            "empty frame should preserve the waiting-state overlay"
+        );
+        assert!(
+            app.extension_custom_active,
+            "empty frame must not silently deactivate custom UI input handling"
+        );
+    }
+
+    #[test]
+    fn clear_custom_overlay_frame_still_deactivates_overlay() {
+        let mut app = build_test_app();
+        let poll_request = ExtensionUiRequest::new("req-poll", "custom", json!({}))
+            .with_extension_id(Some("snake".to_string()));
+        app.handle_custom_extension_ui_request(poll_request);
+        assert!(app.extension_custom_overlay.is_some());
+        assert!(app.extension_custom_active);
+
+        let clear_request =
+            ExtensionUiRequest::new("req-clear", "setWidget", json!({ "clear": true }))
+                .with_extension_id(Some("snake".to_string()));
+        app.apply_custom_overlay_widget_effect(&clear_request, Vec::new());
+
+        assert!(app.extension_custom_overlay.is_none());
+        assert!(!app.extension_custom_active);
+        assert!(app.extension_custom_key_queue.is_empty());
     }
 }
