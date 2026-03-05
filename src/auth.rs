@@ -299,9 +299,22 @@ impl AuthStorage {
 
         // Write to the locked file handle, not a new handle
         let f = locked.as_file_mut();
+        let old_len = f.metadata()?.len();
         f.seek(SeekFrom::Start(0))?;
-        f.set_len(0)?; // Truncate after seeking to avoid data loss
-        f.write_all(data.as_bytes())?;
+        
+        let data_bytes = data.as_bytes();
+        f.write_all(data_bytes)?;
+        
+        let new_len = data_bytes.len() as u64;
+        if new_len < old_len {
+            // Pad with spaces to overwrite any trailing JSON structure that might cause
+            // parsing errors if we crash before set_len. Trailing whitespace is ignored by JSON.
+            let spaces = vec![b' '; (old_len - new_len) as usize];
+            f.write_all(&spaces)?;
+            // Truncate back to the correct logical length
+            f.set_len(new_len)?;
+        }
+        
         f.flush()?;
 
         Ok(())
