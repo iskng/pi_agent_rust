@@ -9260,7 +9260,8 @@ const __pi_vfs = (() => {
     if (!isDir && bytes === undefined && typeof globalThis.__pi_host_read_file_sync === "function") {
       try {
         const content = globalThis.__pi_host_read_file_sync(normalized);
-        bytes = toBytes(content);
+        // Host read payload is base64-encoded to preserve binary file fidelity.
+        bytes = toBytes(content, "base64");
         ensureDir(dirname(normalized));
         state.files.set(normalized, bytes);
       } catch (e) {
@@ -9337,7 +9338,8 @@ export function readFileSync(path, encoding) {
   if (!bytes && typeof globalThis.__pi_host_read_file_sync === "function") {
     try {
       const content = globalThis.__pi_host_read_file_sync(resolved);
-      bytes = __pi_vfs.toBytes(content);
+      // Host read payload is base64-encoded to preserve binary file fidelity.
+      bytes = __pi_vfs.toBytes(content, "base64");
       __pi_vfs.ensureDir(__pi_vfs.dirname(resolved));
       __pi_vfs.files.set(resolved, bytes);
     } catch (e) {
@@ -14319,7 +14321,7 @@ impl<C: SchedulerClock + 'static> PiJsRuntime<C> {
                     }),
                 )?;
 
-                // __pi_host_read_file_sync(path) -> string (throws on error)
+                // __pi_host_read_file_sync(path) -> base64 string (throws on error)
                 // Synchronous real-filesystem read fallback for node:fs readFileSync.
                 // Reads are confined to the workspace root AND any registered
                 // extension roots to prevent host filesystem probing outside
@@ -14385,7 +14387,7 @@ impl<C: SchedulerClock + 'static> PiJsRuntime<C> {
                                         });
                                     }
 
-                                    return Ok(fallback.to_string());
+                                    return Ok(BASE64_STANDARD.encode(fallback.as_bytes()));
                                 }
 
                                 Err(rquickjs::Error::new_loading_message(
@@ -14513,12 +14515,7 @@ impl<C: SchedulerClock + 'static> PiJsRuntime<C> {
                                     ));
                                 }
 
-                                String::from_utf8(buffer).map_err(|err| {
-                                    rquickjs::Error::new_loading_message(
-                                        &path,
-                                        format!("host read utf8: {err}"),
-                                    )
-                                })
+                                Ok(BASE64_STANDARD.encode(buffer))
                             }
 
                             #[cfg(not(target_os = "linux"))]
@@ -14613,12 +14610,7 @@ impl<C: SchedulerClock + 'static> PiJsRuntime<C> {
                                     ));
                                 }
 
-                                String::from_utf8(buffer).map_err(|err| {
-                                    rquickjs::Error::new_loading_message(
-                                        &path,
-                                        format!("host read utf8: {err}"),
-                                    )
-                                })
+                                Ok(BASE64_STANDARD.encode(buffer))
                             }
                         }
                     }),
