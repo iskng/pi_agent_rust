@@ -269,29 +269,29 @@ fn validate_call_result_types(ctx: &Ctx<'_>, result_types: &[ValType]) -> rquick
 // Import helpers
 // ---------------------------------------------------------------------------
 
-fn instance_memory(inst: &mut InstanceState, mem_name: &str) -> Result<wasmtime::Memory, String> {
+fn instance_memory(inst: &mut InstanceState, mem_name: &str) -> anyhow::Result<wasmtime::Memory> {
     inst.instance
         .get_memory(&mut inst.store, mem_name)
-        .ok_or_else(|| format!("Memory '{mem_name}' not found"))
+        .ok_or_else(|| anyhow!("Memory '{mem_name}' not found"))
 }
 
-fn caller_memory(caller: &mut Caller<'_, WasmHostData>) -> Result<wasmtime::Memory, String> {
+fn caller_memory(caller: &mut Caller<'_, WasmHostData>) -> anyhow::Result<wasmtime::Memory> {
     caller
         .get_export("memory")
         .and_then(wasmtime::Extern::into_memory)
-        .ok_or_else(|| "Exported memory 'memory' not found".to_string())
+        .ok_or_else(|| anyhow!("Exported memory 'memory' not found"))
 }
 
 fn checked_memory_range(
     offset: usize,
     len: usize,
     memory_len: usize,
-) -> Result<std::ops::Range<usize>, String> {
+) -> anyhow::Result<std::ops::Range<usize>> {
     let end = offset
         .checked_add(len)
-        .ok_or_else(|| "Memory access overflow".to_string())?;
+        .ok_or_else(|| anyhow!("Memory access overflow"))?;
     if end > memory_len {
-        return Err("Memory access out of bounds".to_string());
+        return Err(anyhow!("Memory access out of bounds"));
     }
     Ok(offset..end)
 }
@@ -300,13 +300,13 @@ fn caller_read_bytes(
     caller: &mut Caller<'_, WasmHostData>,
     offset: usize,
     len: usize,
-) -> Result<Vec<u8>, String> {
+) -> anyhow::Result<Vec<u8>> {
     let memory = caller_memory(caller)?;
     let _ = checked_memory_range(offset, len, memory.data_size(&mut *caller))?;
     let mut bytes = vec![0_u8; len];
     memory
         .read(&mut *caller, offset, &mut bytes)
-        .map_err(|err| err.to_string())?;
+        .map_err(anyhow::Error::from)?;
     Ok(bytes)
 }
 
@@ -314,15 +314,15 @@ fn caller_write_bytes(
     caller: &mut Caller<'_, WasmHostData>,
     offset: usize,
     bytes: &[u8],
-) -> Result<(), String> {
+) -> anyhow::Result<()> {
     let memory = caller_memory(caller)?;
     let _ = checked_memory_range(offset, bytes.len(), memory.data_size(&mut *caller))?;
     memory
         .write(&mut *caller, offset, bytes)
-        .map_err(|err| err.to_string())
+        .map_err(anyhow::Error::from)
 }
 
-fn caller_read_u32(caller: &mut Caller<'_, WasmHostData>, offset: usize) -> Result<u32, String> {
+fn caller_read_u32(caller: &mut Caller<'_, WasmHostData>, offset: usize) -> anyhow::Result<u32> {
     let bytes = caller_read_bytes(caller, offset, 4)?;
     Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
 }
@@ -331,7 +331,7 @@ fn caller_write_u32(
     caller: &mut Caller<'_, WasmHostData>,
     offset: usize,
     value: u32,
-) -> Result<(), String> {
+) -> anyhow::Result<()> {
     caller_write_bytes(caller, offset, &value.to_le_bytes())
 }
 
@@ -339,14 +339,14 @@ fn caller_write_u64(
     caller: &mut Caller<'_, WasmHostData>,
     offset: usize,
     value: u64,
-) -> Result<(), String> {
+) -> anyhow::Result<()> {
     caller_write_bytes(caller, offset, &value.to_le_bytes())
 }
 
 fn caller_read_c_string(
     caller: &mut Caller<'_, WasmHostData>,
     offset: usize,
-) -> Result<String, String> {
+) -> anyhow::Result<String> {
     let memory = caller_memory(caller)?;
     let bytes = memory.data(&mut *caller);
     let mut end = offset;
@@ -354,23 +354,23 @@ fn caller_read_c_string(
         end += 1;
     }
     if end >= bytes.len() {
-        return Err("Unterminated string in WASM memory".to_string());
+        return Err(anyhow!("Unterminated string in WASM memory"));
     }
     Ok(String::from_utf8_lossy(&bytes[offset..end]).into_owned())
 }
 
-fn val_i32(params: &[Val], idx: usize, label: &str) -> Result<i32, String> {
+fn val_i32(params: &[Val], idx: usize, label: &str) -> anyhow::Result<i32> {
     match params.get(idx) {
         Some(Val::I32(value)) => Ok(*value),
-        _ => Err(format!("Expected i32 parameter '{label}' at index {idx}")),
+        _ => Err(anyhow!("Expected i32 parameter '{label}' at index {idx}")),
     }
 }
 
-fn val_i64(params: &[Val], idx: usize, label: &str) -> Result<i64, String> {
+fn val_i64(params: &[Val], idx: usize, label: &str) -> anyhow::Result<i64> {
     match params.get(idx) {
         Some(Val::I64(value)) => Ok(*value),
         Some(Val::I32(value)) => Ok(i64::from(*value)),
-        _ => Err(format!("Expected i64 parameter '{label}' at index {idx}")),
+        _ => Err(anyhow!("Expected i64 parameter '{label}' at index {idx}")),
     }
 }
 
@@ -557,13 +557,14 @@ fn register_host_imports(
                                     usize::try_from(val_i32(params, 3, "newOffset")?)
                                         .map_err(|_| anyhow!("Negative newOffset pointer"))?;
 
-                                let (path, current_position) = match caller.data().open_files.get(&fd) {
-                                    Some(handle) => (handle.path.clone(), handle.position),
-                                    None => {
-                                        set_i32_result(results, 8);
-                                        return Ok(());
-                                    }
-                                };
+                                let (path, current_position) =
+                                    match caller.data().open_files.get(&fd) {
+                                        Some(handle) => (handle.path.clone(), handle.position),
+                                        None => {
+                                            set_i32_result(results, 8);
+                                            return Ok(());
+                                        }
+                                    };
                                 let Some(file_len) = caller
                                     .data()
                                     .staged_files
@@ -984,23 +985,22 @@ pub(crate) fn inject_wasm_globals(
                       mem_name: String,
                       offset: u32,
                       len: u32|
-                      -> rquickjs::Result<Value<'_>> {
+                      -> rquickjs::Result<Vec<u8>> {
                     let mut bridge = st.borrow_mut();
                     let inst = bridge
                         .instances
                         .get_mut(&instance_id)
                         .ok_or_else(|| throw_wasm(&ctx, "RuntimeError", "Instance not found"))?;
                     let memory = instance_memory(inst, &mem_name)
-                        .map_err(|e| throw_wasm(&ctx, "RuntimeError", &e))?;
+                        .map_err(|e| throw_wasm(&ctx, "RuntimeError", &e.to_string()))?;
                     let start = usize::try_from(offset)
                         .map_err(|_| throw_wasm(&ctx, "RuntimeError", "Offset overflow"))?;
                     let len = usize::try_from(len)
                         .map_err(|_| throw_wasm(&ctx, "RuntimeError", "Length overflow"))?;
                     let data = memory.data(&inst.store);
                     let range = checked_memory_range(start, len, data.len())
-                        .map_err(|e| throw_wasm(&ctx, "RuntimeError", &e))?;
-                    let buffer = ArrayBuffer::new_copy(ctx.clone(), &data[range])?;
-                    Ok(buffer.into_value())
+                        .map_err(|e| throw_wasm(&ctx, "RuntimeError", &e.to_string()))?;
+                    Ok(data[range].to_vec())
                 },
             ),
         )?;
@@ -1025,11 +1025,12 @@ pub(crate) fn inject_wasm_globals(
                         .get_mut(&instance_id)
                         .ok_or_else(|| throw_wasm(&ctx, "RuntimeError", "Instance not found"))?;
                     let memory = instance_memory(inst, &mem_name)
-                        .map_err(|e| throw_wasm(&ctx, "RuntimeError", &e))?;
+                        .map_err(|e| throw_wasm(&ctx, "RuntimeError", &e.to_string()))?;
                     let start = usize::try_from(offset)
                         .map_err(|_| throw_wasm(&ctx, "RuntimeError", "Offset overflow"))?;
-                    let _ = checked_memory_range(start, bytes.len(), memory.data_size(&mut inst.store))
-                        .map_err(|e| throw_wasm(&ctx, "RuntimeError", &e))?;
+                    let _ =
+                        checked_memory_range(start, bytes.len(), memory.data_size(&mut inst.store))
+                            .map_err(|e| throw_wasm(&ctx, "RuntimeError", &e.to_string()))?;
                     memory
                         .write(&mut inst.store, start, &bytes)
                         .map_err(|e| throw_wasm(&ctx, "RuntimeError", &e.to_string()))?;
@@ -1053,7 +1054,7 @@ pub(crate) fn inject_wasm_globals(
                         .ok_or_else(|| throw_wasm(&ctx, "RuntimeError", "Instance not found"))?;
                     let started = Instant::now();
                     let memory = instance_memory(inst, &mem_name)
-                        .map_err(|e| throw_wasm(&ctx, "RuntimeError", &e))?;
+                        .map_err(|e| throw_wasm(&ctx, "RuntimeError", &e.to_string()))?;
                     let data = memory.data(&inst.store);
                     let len = i32::try_from(data.len()).unwrap_or(i32::MAX);
                     let buffer = ArrayBuffer::new_copy(ctx.clone(), data)?;
@@ -1969,6 +1970,105 @@ mod tests {
                 )
                 .expect("call with import stubs");
             assert_eq!(result, 1);
+        });
+    }
+
+    #[test]
+    fn native_memory_helpers_round_trip_live_wasm_memory() {
+        let wasm_bytes = wat_to_wasm(
+            r#"(module
+              (memory (export "memory") 1)
+              (func (export "read32") (param i32) (result i32)
+                local.get 0
+                i32.load)
+              (func (export "write32") (param i32 i32)
+                local.get 0
+                local.get 1
+                i32.store)
+            )"#,
+        );
+        run_wasm_test(|ctx, _state| {
+            let arr = rquickjs::Array::new(ctx.clone()).unwrap();
+            for (i, &b) in wasm_bytes.iter().enumerate() {
+                arr.set(i, i32::from(b)).unwrap();
+            }
+            ctx.globals().set("__test_bytes", arr).unwrap();
+
+            let summary: String = ctx
+                .eval(
+                    r#"
+                    var mid = __pi_wasm_compile_native(__test_bytes);
+                    var iid = __pi_wasm_instantiate_native(mid);
+                    __pi_wasm_memory_write_native(iid, "memory", 32, [1, 2, 3, 4]);
+                    var readBack = __pi_wasm_call_export_native(iid, "read32", [32]);
+                    __pi_wasm_call_export_native(iid, "write32", [40, 0x11223344]);
+                    var bytes = __pi_wasm_memory_read_native(iid, "memory", 40, 4);
+                    [readBack, bytes[0], bytes[1], bytes[2], bytes[3]].join(",");
+                "#,
+                )
+                .expect("memory helpers round-trip");
+            assert_eq!(summary, "67305985,68,51,34,17");
+        });
+    }
+
+    #[test]
+    fn staged_file_host_imports_can_open_and_read_wad_bytes() {
+        let wasm_bytes = wat_to_wasm(
+            r#"(module
+              (import "env" "__syscall_openat" (func $openat (param i32 i32 i32 i32) (result i32)))
+              (import "env" "fd_read" (func $fd_read (param i32 i32 i32 i32) (result i32)))
+              (import "env" "fd_close" (func $fd_close (param i32) (result i32)))
+              (memory (export "memory") 1)
+              (data (i32.const 64) "/doom/doom1.wad\00")
+              (func (export "readfirst4") (result i32)
+                (local $fd i32)
+                i32.const 96
+                i32.const 128
+                i32.store
+                i32.const 100
+                i32.const 4
+                i32.store
+                i32.const -100
+                i32.const 64
+                i32.const 0
+                i32.const 0
+                call $openat
+                local.tee $fd
+                i32.const 96
+                i32.const 1
+                i32.const 104
+                call $fd_read
+                drop
+                local.get $fd
+                call $fd_close
+                drop
+                i32.const 128
+                i32.load)
+              (func (export "bytes_read") (result i32)
+                i32.const 104
+                i32.load)
+            )"#,
+        );
+        run_wasm_test(|ctx, _state| {
+            let arr = rquickjs::Array::new(ctx.clone()).unwrap();
+            for (i, &b) in wasm_bytes.iter().enumerate() {
+                arr.set(i, i32::from(b)).unwrap();
+            }
+            ctx.globals().set("__test_bytes", arr).unwrap();
+
+            let summary: String = ctx
+                .eval(
+                    r#"
+                    __pi_wasm_stage_file_native("/doom/doom1.wad", [1, 2, 3, 4]);
+                    var mid = __pi_wasm_compile_native(__test_bytes);
+                    var iid = __pi_wasm_instantiate_native(mid);
+                    var first = __pi_wasm_call_export_native(iid, "readfirst4", []);
+                    var bytes = __pi_wasm_call_export_native(iid, "bytes_read", []);
+                    [first, bytes].join(",");
+                "#,
+                )
+                .expect("staged file read");
+            assert_eq!(summary, "67305985,4");
         });
     }
 }
