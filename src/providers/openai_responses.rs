@@ -419,6 +419,20 @@ struct ToolCallState {
     arguments: String,
 }
 
+enum TerminalContentSnapshot {
+    Text {
+        content_index: usize,
+        content: String,
+    },
+    Thinking {
+        content_index: usize,
+        content: String,
+    },
+    ToolCall {
+        content_index: usize,
+    },
+}
+
 struct StreamState<S>
 where
     S: Stream<Item = std::result::Result<Vec<u8>, std::io::Error>> + Unpin,
@@ -767,27 +781,31 @@ where
         }
     }
 
-    fn push_terminal_content_end_events(&mut self) {
-        for (content_index, block) in self.partial.content.iter().enumerate() {
-            match block {
-                ContentBlock::Text(t) => {
-                    self.pending_events.push_back(StreamEvent::TextEnd {
-                        content_index,
-                        content: t.text.clone(),
-                    });
+    fn terminal_content_snapshots(&self) -> Vec<TerminalContentSnapshot> {
+        self.partial
+            .content
+            .iter()
+            .enumerate()
+            .filter_map(|(content_index, block)| match block {
+                ContentBlock::Text(t) => Some(TerminalContentSnapshot::Text {
+                    content_index,
+                    content: t.text.clone(),
+                }),
+                ContentBlock::Thinking(t) => Some(TerminalContentSnapshot::Thinking {
+                    content_index,
+                    content: t.thinking.clone(),
+                }),
+                ContentBlock::ToolCall(_) => {
+                    Some(TerminalContentSnapshot::ToolCall { content_index })
                 }
-                ContentBlock::Thinking(t) => {
-                    self.pending_events.push_back(StreamEvent::ThinkingEnd {
-                        content_index,
-                        content: t.thinking.clone(),
-                    });
-                }
-                ContentBlock::Image(_) | ContentBlock::ToolCall(_) => {}
-            }
-        }
+                ContentBlock::Image(_) => None,
+            })
+            .collect()
     }
 
-    fn open_tool_call_snapshots_in_content_order(&self) -> Vec<(String, String, String, String)> {
+    fn open_tool_call_snapshots_in_content_order(
+        &self,
+    ) -> Vec<(usize, String, String, String, String)> {
         let mut open_tool_calls: Vec<(usize, String, String, String, String)> = self
             .tool_calls_by_item_id
             .iter()
@@ -803,9 +821,6 @@ where
             .collect();
         open_tool_calls.sort_by_key(|(content_index, ..)| *content_index);
         open_tool_calls
-            .into_iter()
-            .map(|(_, item_id, call_id, name, arguments)| (item_id, call_id, name, arguments))
-            .collect()
     }
 
     fn finish(&mut self, incomplete_reason: Option<String>) {
@@ -813,11 +828,40 @@ where
             return;
         }
 
-        self.push_terminal_content_end_events();
+        let mut open_tool_calls = self
+            .open_tool_call_snapshots_in_content_order()
+            .into_iter()
+            .peekable();
 
-        // Best-effort: close any tool calls we didn't see "done" for.
-        for (id, call_id, name, arguments) in self.open_tool_call_snapshots_in_content_order() {
-            self.end_tool_call(&id, &call_id, &name, &arguments);
+        for block in self.terminal_content_snapshots() {
+            match block {
+                TerminalContentSnapshot::Text {
+                    content_index,
+                    content,
+                } => self.pending_events.push_back(StreamEvent::TextEnd {
+                    content_index,
+                    content,
+                }),
+                TerminalContentSnapshot::Thinking {
+                    content_index,
+                    content,
+                } => self.pending_events.push_back(StreamEvent::ThinkingEnd {
+                    content_index,
+                    content,
+                }),
+                TerminalContentSnapshot::ToolCall { content_index } => {
+                    while let Some((_, item_id, call_id, name, arguments)) = open_tool_calls
+                        .next_if(|(tool_content_index, ..)| *tool_content_index == content_index)
+                    {
+                        self.end_tool_call(&item_id, &call_id, &name, &arguments);
+                    }
+                }
+            }
+        }
+
+        // Best-effort: close any tool calls whose content block disappeared unexpectedly.
+        for (_, item_id, call_id, name, arguments) in open_tool_calls {
+            self.end_tool_call(&item_id, &call_id, &name, &arguments);
         }
 
         // Infer stop reason.
@@ -1677,10 +1721,84 @@ mod tests {
             let ordered_ids: Vec<String> = state
                 .open_tool_call_snapshots_in_content_order()
                 .into_iter()
-                .map(|(item_id, ..)| item_id)
+                .map(|(_, item_id, ..)| item_id)
                 .collect();
 
             assert_eq!(ordered_ids, vec!["early".to_string(), "late".to_string()]);
+        });
+    }
+
+    #[test]
+    fn test_finish_keeps_open_tool_call_end_in_content_order() {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime build");
+        runtime.block_on(async move {
+            let byte_stream = stream::iter(vec![Ok(Vec::new())]);
+            let event_source = crate::sse::SseStream::new(Box::pin(byte_stream));
+            let mut state = StreamState::new(
+                event_source,
+                "gpt-test".to_string(),
+                "openai-responses".to_string(),
+                "openai".to_string(),
+            );
+
+            state
+                .process_event(
+                    &json!({
+                        "type": "response.output_text.delta",
+                        "item_id": "msg_1",
+                        "content_index": 0,
+                        "delta": "before",
+                    })
+                    .to_string(),
+                )
+                .expect("first text delta");
+            state
+                .process_event(
+                    &json!({
+                        "type": "response.output_item.added",
+                        "item": {
+                            "type": "function_call",
+                            "id": "fc_7",
+                            "call_id": "call_7",
+                            "name": "echo",
+                            "arguments": "{\"text\":\"mid\"}"
+                        }
+                    })
+                    .to_string(),
+                )
+                .expect("tool call added");
+            state
+                .process_event(
+                    &json!({
+                        "type": "response.output_text.delta",
+                        "item_id": "msg_2",
+                        "content_index": 0,
+                        "delta": "after",
+                    })
+                    .to_string(),
+                )
+                .expect("second text delta");
+
+            state.finish(None);
+
+            let terminal_event_order: Vec<(&'static str, usize)> = state
+                .pending_events
+                .iter()
+                .filter_map(|event| match event {
+                    StreamEvent::TextEnd { content_index, .. } => Some(("text", *content_index)),
+                    StreamEvent::ToolCallEnd { content_index, .. } => {
+                        Some(("tool", *content_index))
+                    }
+                    _ => None,
+                })
+                .collect();
+
+            assert_eq!(
+                terminal_event_order,
+                vec![("text", 0), ("tool", 1), ("text", 2)]
+            );
         });
     }
 
