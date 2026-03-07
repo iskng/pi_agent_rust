@@ -345,6 +345,7 @@ impl AutocompleteProvider {
     fn suggest_path(&self, token: &TokenAtCursor<'_>) -> AutocompleteResponse {
         let raw = token.text.trim();
         let (dir_part_raw, base_part) = split_path_prefix(raw);
+        let separator = preferred_path_separator(raw, &dir_part_raw);
 
         let Some(dir_path) =
             resolve_dir_path(&self.cwd, &dir_part_raw, self.home_dir_override.as_deref())
@@ -375,17 +376,15 @@ impl AutocompleteProvider {
             }
 
             let mut insert = if dir_part_raw == "." {
-                if raw.starts_with("./") {
-                    format!("./{file_name}")
+                if raw.starts_with("./") || raw.starts_with(".\\") {
+                    format!(".{separator}{file_name}")
                 } else {
                     file_name.to_string()
                 }
-            } else if dir_part_raw.ends_with(std::path::MAIN_SEPARATOR)
-                || dir_part_raw.ends_with('/')
-            {
+            } else if dir_part_raw.ends_with('/') || dir_part_raw.ends_with('\\') {
                 format!("{dir_part_raw}{file_name}")
             } else {
-                format!("{dir_part_raw}/{file_name}")
+                format!("{dir_part_raw}{separator}{file_name}")
             };
 
             let is_dir = entry.file_type().is_some_and(|ty| ty.is_dir());
@@ -874,10 +873,15 @@ fn is_path_like(text: &str) -> bool {
         return true;
     }
     text.starts_with("./")
+        || text.starts_with(".\\")
         || text.starts_with("../")
+        || text.starts_with("..\\")
         || text.starts_with("~/")
+        || text.starts_with("~\\")
         || text.starts_with('/')
+        || text.starts_with('\\')
         || text.contains('/')
+        || text.contains('\\')
 }
 
 fn expand_tilde(text: &str) -> String {
@@ -897,10 +901,13 @@ fn resolve_dir_path(cwd: &Path, dir_part: &str, home_override: Option<&Path>) ->
     if dir_part == "~" {
         return home_dir();
     }
-    if let Some(rest) = dir_part.strip_prefix("~/") {
+    if let Some(rest) = dir_part
+        .strip_prefix("~/")
+        .or_else(|| dir_part.strip_prefix("~\\"))
+    {
         return home_dir().map(|home| home.join(rest));
     }
-    if Path::new(dir_part).is_absolute() {
+    if is_absolute_dir_path_like(dir_part) {
         return Some(PathBuf::from(dir_part));
     }
 
@@ -912,18 +919,49 @@ fn split_path_prefix(path: &str) -> (String, String) {
     if path == "~" {
         return ("~".to_string(), String::new());
     }
-    if path.ends_with('/') {
+    if path.ends_with('/') || path.ends_with('\\') {
         return (path.to_string(), String::new());
     }
-    let Some((dir, base)) = path.rsplit_once('/') else {
+    let Some(separator_index) = path.rfind(['/', '\\']) else {
         return (".".to_string(), path.to_string());
     };
-    let dir = if dir.is_empty() {
-        "/".to_string()
+
+    let separator = path[separator_index..].chars().next().unwrap_or('/');
+    let base_start = separator_index + separator.len_utf8();
+    let base = path[base_start..].to_string();
+
+    let dir = if separator_index == 0 {
+        separator.to_string()
+    } else if separator_index == 2 && path.as_bytes().get(1) == Some(&b':') {
+        path[..base_start].to_string()
     } else {
-        dir.to_string()
+        path[..separator_index].to_string()
     };
-    (dir, base.to_string())
+
+    (dir, base)
+}
+
+fn is_absolute_dir_path_like(path: &str) -> bool {
+    if path.is_empty() {
+        return false;
+    }
+
+    if Path::new(path).is_absolute() {
+        return true;
+    }
+
+    path.starts_with('/')
+        || path.starts_with('\\')
+        || (path.as_bytes().get(1) == Some(&b':')
+            && matches!(path.as_bytes().get(2), Some(&b'/') | Some(&b'\\')))
+}
+
+fn preferred_path_separator(raw: &str, dir_part_raw: &str) -> char {
+    if raw.contains('\\') || dir_part_raw.contains('\\') {
+        '\\'
+    } else {
+        '/'
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1452,6 +1490,14 @@ mod tests {
     }
 
     #[test]
+    fn is_path_like_windows_separators() {
+        assert!(is_path_like(".\\foo"));
+        assert!(is_path_like("src\\main.rs"));
+        assert!(is_path_like("~\\notes.txt"));
+        assert!(is_path_like("\\\\server\\share"));
+    }
+
+    #[test]
     fn is_path_like_plain_word_not_path() {
         assert!(!is_path_like("hello"));
         assert!(!is_path_like("foo.bar"));
@@ -1496,9 +1542,27 @@ mod tests {
     }
 
     #[test]
+    fn resolve_dir_path_tilde_backslash_with_override() {
+        let result = resolve_dir_path(Path::new("/cwd"), "~\\docs", Some(Path::new("/mock_home")));
+        assert_eq!(result, Some(PathBuf::from("/mock_home/docs")));
+    }
+
+    #[test]
     fn resolve_dir_path_tilde_alone() {
         let result = resolve_dir_path(Path::new("/cwd"), "~", Some(Path::new("/mock_home")));
         assert_eq!(result, Some(PathBuf::from("/mock_home")));
+    }
+
+    #[test]
+    fn resolve_dir_path_windows_drive_root_is_absolute_like() {
+        let result = resolve_dir_path(Path::new("/cwd"), "C:\\Users", None);
+        assert_eq!(result, Some(PathBuf::from("C:\\Users")));
+    }
+
+    #[test]
+    fn resolve_dir_path_windows_rooted_backslash_is_absolute_like() {
+        let result = resolve_dir_path(Path::new("/cwd"), "\\Users", None);
+        assert_eq!(result, Some(PathBuf::from("\\Users")));
     }
 
     // ── split_path_prefix ────────────────────────────────────────────
@@ -1524,6 +1588,22 @@ mod tests {
         assert_eq!(
             split_path_prefix("src/main.rs"),
             ("src".to_string(), "main.rs".to_string())
+        );
+    }
+
+    #[test]
+    fn split_path_prefix_windows_relative_path() {
+        assert_eq!(
+            split_path_prefix("src\\main.rs"),
+            ("src".to_string(), "main.rs".to_string())
+        );
+    }
+
+    #[test]
+    fn split_path_prefix_windows_drive_root_path() {
+        assert_eq!(
+            split_path_prefix("C:\\notes.txt"),
+            ("C:\\".to_string(), "notes.txt".to_string())
         );
     }
 
@@ -2051,6 +2131,31 @@ mod tests {
 
         let resp = provider.suggest("~/no", 4);
         assert!(resp.items.iter().any(|i| i.insert.contains("notes.txt")));
+    }
+
+    #[test]
+    fn path_completion_windows_relative_input_preserves_backslashes() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(tmp.path().join("src")).expect("mkdir");
+        std::fs::write(tmp.path().join("src").join("main.rs"), "hi").expect("write");
+
+        let mut provider =
+            AutocompleteProvider::new(tmp.path().to_path_buf(), AutocompleteCatalog::default());
+
+        let resp = provider.suggest("src\\ma", "src\\ma".len());
+        assert!(resp.items.iter().any(|i| i.insert == "src\\main.rs"));
+    }
+
+    #[test]
+    fn path_completion_windows_dot_prefix_preserves_backslashes() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(tmp.path().join("main.rs"), "hi").expect("write");
+
+        let mut provider =
+            AutocompleteProvider::new(tmp.path().to_path_buf(), AutocompleteCatalog::default());
+
+        let resp = provider.suggest(".\\ma", ".\\ma".len());
+        assert!(resp.items.iter().any(|i| i.insert == ".\\main.rs"));
     }
 
     // ── FileCache invalidation ───────────────────────────────────────
