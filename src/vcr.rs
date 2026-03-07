@@ -507,8 +507,17 @@ fn sanitize_test_name(value: &str) -> String {
 fn load_cassette(path: &Path) -> Result<Cassette> {
     let content = std::fs::read_to_string(path)
         .map_err(|e| Error::config(format!("Failed to read cassette {}: {e}", path.display())))?;
-    serde_json::from_str(&content)
-        .map_err(|e| Error::config(format!("Failed to parse cassette {}: {e}", path.display())))
+    let cassette: Cassette = serde_json::from_str(&content)
+        .map_err(|e| Error::config(format!("Failed to parse cassette {}: {e}", path.display())))?;
+    if cassette.version != CASSETTE_VERSION {
+        return Err(Error::config(format!(
+            "Cassette {} has version {:?}, expected {:?}",
+            path.display(),
+            cassette.version,
+            CASSETTE_VERSION,
+        )));
+    }
+    Ok(cassette)
 }
 
 fn save_cassette(path: &Path, cassette: &Cassette) -> Result<()> {
