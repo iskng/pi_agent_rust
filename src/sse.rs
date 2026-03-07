@@ -8,6 +8,8 @@ use std::collections::VecDeque;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
+const MAX_EVENT_DATA_BYTES: usize = 100 * 1024 * 1024;
+
 /// A parsed SSE event.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SseEvent {
@@ -69,13 +71,28 @@ impl SseParser {
         }
     }
 
-    /// Process a single line of SSE data.
-    fn process_line(line: &str, current: &mut SseEvent, has_data: &mut bool) {
-        // limit event data to 100MB to prevent OOM from malicious/broken streams
-        if current.data.len() > 100 * 1024 * 1024 {
+    #[inline]
+    fn append_data_line(
+        current: &mut SseEvent,
+        value: &str,
+        has_data: &mut bool,
+        max_event_data_bytes: usize,
+    ) {
+        let projected_len = current
+            .data
+            .len()
+            .saturating_add(value.len())
+            .saturating_add(1);
+        if projected_len > max_event_data_bytes {
             return;
         }
+        current.data.push_str(value);
+        current.data.push('\n');
+        *has_data = true;
+    }
 
+    /// Process a single line of SSE data.
+    fn process_line(line: &str, current: &mut SseEvent, has_data: &mut bool) {
         if let Some(rest) = line.strip_prefix(':') {
             // Comment line - ignore (but could be used for keep-alive)
             let _ = rest;
@@ -84,11 +101,7 @@ impl SseParser {
             let value = value.strip_prefix(' ').unwrap_or(value);
             match field {
                 "event" => current.event = Self::intern_event_type(value),
-                "data" => {
-                    current.data.push_str(value);
-                    current.data.push('\n');
-                    *has_data = true;
-                }
+                "data" => Self::append_data_line(current, value, has_data, MAX_EVENT_DATA_BYTES),
                 "id" => {
                     if !value.contains('\0') {
                         current.id = Some(value.to_string());
@@ -101,10 +114,7 @@ impl SseParser {
             // Field with no value
             match line {
                 "event" => current.event = Cow::Borrowed(""),
-                "data" => {
-                    current.data.push('\n');
-                    *has_data = true;
-                }
+                "data" => Self::append_data_line(current, "", has_data, MAX_EVENT_DATA_BYTES),
                 "id" => current.id = Some(String::new()),
                 _ => {}
             }
@@ -928,6 +938,19 @@ mod tests {
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].retry, Some(3000));
         assert_eq!(events[1].retry, Some(3000));
+    }
+
+    #[test]
+    fn test_append_data_line_enforces_projected_limit() {
+        let mut current = SseEvent::default();
+        let mut has_data = false;
+
+        SseParser::append_data_line(&mut current, "ab", &mut has_data, 3);
+        assert_eq!(current.data, "ab\n");
+        assert!(has_data);
+
+        SseParser::append_data_line(&mut current, "c", &mut has_data, 3);
+        assert_eq!(current.data, "ab\n");
     }
 
     #[test]
