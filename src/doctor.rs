@@ -1136,7 +1136,15 @@ fn check_extension(
                     "Fix the malformed settings.json, point PI_CONFIG_PATH at a valid file, or rerun with `--policy <safe|balanced|permissive>` to inspect extension compatibility independently",
                 ),
             );
-            Config::default().resolve_extension_policy_with_metadata(policy_override)
+            let has_explicit_policy =
+                policy_override.is_some() || std::env::var_os("PI_EXTENSION_POLICY").is_some();
+            if has_explicit_policy {
+                Config::default().resolve_extension_policy_with_metadata(policy_override)
+            } else {
+                // If project config is unreadable, fail closed instead of silently
+                // analyzing under the default permissive profile.
+                Config::default().resolve_extension_policy_with_metadata(Some("safe"))
+            }
         }
     };
     let ext_id = ext_path
@@ -1620,6 +1628,86 @@ import net from "node:net";
         assert!(
             report.findings.iter().any(|f| f.title.contains("node:net")),
             "doctor should continue extension analysis after a config load failure"
+        );
+    }
+
+    #[test]
+    fn run_doctor_extension_path_config_load_failure_falls_back_to_safe_policy() {
+        let current_dir = tempfile::tempdir().expect("current dir");
+        let _guard = CurrentDirGuard::set(current_dir.path());
+        let project = tempfile::tempdir().expect("project dir");
+        let config_dir = project.path().join(".pi");
+        std::fs::create_dir_all(&config_dir).expect("create project config dir");
+        std::fs::write(config_dir.join("settings.json"), r#"{ "extensionPolicy": "#)
+            .expect("write malformed project settings");
+        write_extension_fixture(
+            project.path(),
+            r#"
+export default function(pi) {
+    pi.exec("ls");
+}
+"#,
+        );
+
+        let opts = DoctorOptions {
+            cwd: project.path(),
+            extension_path: Some("ext"),
+            policy_override: None,
+            fix: false,
+            only: None,
+        };
+        let report = run_doctor(&opts).expect("doctor report");
+
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|f| f.title == "Extension ext: incompatible"),
+            "doctor should fail closed under a safe fallback when config loading fails"
+        );
+        assert!(
+            report.findings.iter().any(|f| f.title.contains("exec")),
+            "safe fallback should still flag denied exec usage"
+        );
+    }
+
+    #[test]
+    fn run_doctor_extension_path_config_load_failure_honors_cli_policy_override() {
+        let current_dir = tempfile::tempdir().expect("current dir");
+        let _guard = CurrentDirGuard::set(current_dir.path());
+        let project = tempfile::tempdir().expect("project dir");
+        let config_dir = project.path().join(".pi");
+        std::fs::create_dir_all(&config_dir).expect("create project config dir");
+        std::fs::write(config_dir.join("settings.json"), r#"{ "extensionPolicy": "#)
+            .expect("write malformed project settings");
+        write_extension_fixture(
+            project.path(),
+            r#"
+export default function(pi) {
+    pi.exec("ls");
+}
+"#,
+        );
+
+        let opts = DoctorOptions {
+            cwd: project.path(),
+            extension_path: Some("ext"),
+            policy_override: Some("permissive"),
+            fix: false,
+            only: None,
+        };
+        let report = run_doctor(&opts).expect("doctor report");
+
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|f| f.title == "Extension ext: compatible"),
+            "explicit CLI overrides should still control fallback analysis"
+        );
+        assert!(
+            !report.findings.iter().any(|f| f.title.contains("exec")),
+            "permissive override should suppress safe-only exec denial findings"
         );
     }
 

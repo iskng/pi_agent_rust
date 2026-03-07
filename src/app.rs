@@ -15,9 +15,14 @@ use crate::auth::AuthStorage;
 use crate::cli;
 use crate::config::Config;
 use crate::model::{self, AssistantMessage, ContentBlock, ImageContent, TextContent};
-use crate::models::{ModelEntry, ModelRegistry, default_models_path, model_entry_is_ready, model_requires_configured_credential, normalize_api_key_opt};
+use crate::models::{
+    ModelEntry, ModelRegistry, default_models_path, model_entry_is_ready,
+    model_requires_configured_credential, normalize_api_key_opt,
+};
 use crate::provider::{StreamOptions, ThinkingBudgets};
-use crate::provider_metadata::{canonical_provider_id, provider_ids_match, split_provider_model_spec};
+use crate::provider_metadata::{
+    canonical_provider_id, provider_ids_match, split_provider_model_spec,
+};
 use crate::session::Session;
 use crate::tools::process_file_arguments;
 
@@ -404,7 +409,17 @@ pub fn select_model_and_thinking(
         } else {
             ready_candidates.as_slice()
         };
-        selected_model = Some(default_model_from_candidates(preferred_pool));
+        selected_model = config
+            .default_model
+            .as_deref()
+            .and_then(|default_model| registry.find(provider, default_model))
+            .filter(|found| {
+                preferred_pool.iter().any(|candidate| {
+                    candidate.model.id.eq_ignore_ascii_case(&found.model.id)
+                        && provider_ids_match(&candidate.model.provider, &found.model.provider)
+                })
+            })
+            .or_else(|| Some(default_model_from_candidates(preferred_pool)));
     } else if let Some(model_id) = cli.model.as_deref() {
         if let Some((provider, scoped_model_id)) = split_provider_model_spec(model_id) {
             selected_model = registry
@@ -1337,6 +1352,53 @@ mod tests {
 
         assert_eq!(selection.model_entry.model.provider, "openai");
         assert_eq!(selection.model_entry.model.id, "gpt-5.4");
+    }
+
+    #[test]
+    fn select_model_and_thinking_provider_only_honors_configured_default_model() {
+        let cli = cli::Cli::parse_from(["pi", "--provider", "openai"]);
+        let config = Config {
+            default_model: Some("gpt-4o-mini".to_string()),
+            ..Config::default()
+        };
+        let session = Session::in_memory();
+        let registry = registry_with_entries(vec![
+            test_model_entry("gpt-5.4", "openai", true),
+            test_model_entry("gpt-4o-mini", "openai", true),
+        ]);
+
+        let selection =
+            select_model_and_thinking(&cli, &config, &session, &registry, &[], Path::new("/tmp"))
+                .expect("provider-only selection should honor configured default_model");
+
+        assert_eq!(selection.model_entry.model.provider, "openai");
+        assert_eq!(selection.model_entry.model.id, "gpt-4o-mini");
+    }
+
+    #[test]
+    fn select_model_and_thinking_provider_only_skips_unready_configured_default_model() {
+        let cli = cli::Cli::parse_from(["pi", "--provider", "acme"]);
+        let config = Config {
+            default_model: Some("cloud-model".to_string()),
+            ..Config::default()
+        };
+        let session = Session::in_memory();
+
+        let mut unready_remote = test_model_entry("cloud-model", "acme", true);
+        unready_remote.api_key = None;
+        unready_remote.auth_header = true;
+
+        let mut keyless_ready = test_model_entry("local-model", "acme", false);
+        keyless_ready.api_key = None;
+        keyless_ready.auth_header = false;
+
+        let registry = registry_with_entries(vec![unready_remote, keyless_ready]);
+        let selection =
+            select_model_and_thinking(&cli, &config, &session, &registry, &[], Path::new("/tmp"))
+                .expect("provider-only selection should still prefer a ready model");
+
+        assert_eq!(selection.model_entry.model.provider, "acme");
+        assert_eq!(selection.model_entry.model.id, "local-model");
     }
 
     #[test]

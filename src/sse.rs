@@ -82,6 +82,7 @@ impl SseParser {
     #[inline]
     fn intern_event_type(value: &str) -> Cow<'static, str> {
         match value {
+            // Anthropic streaming events
             "message" => Cow::Borrowed("message"),
             "message_start" => Cow::Borrowed("message_start"),
             "message_stop" => Cow::Borrowed("message_stop"),
@@ -89,6 +90,34 @@ impl SseParser {
             "content_block_start" => Cow::Borrowed("content_block_start"),
             "content_block_delta" => Cow::Borrowed("content_block_delta"),
             "content_block_stop" => Cow::Borrowed("content_block_stop"),
+            // OpenAI Responses API streaming events
+            "response.completed" => Cow::Borrowed("response.completed"),
+            "response.done" => Cow::Borrowed("response.done"),
+            "response.failed" => Cow::Borrowed("response.failed"),
+            "response.incomplete" => Cow::Borrowed("response.incomplete"),
+            "response.output_text.delta" => Cow::Borrowed("response.output_text.delta"),
+            "response.output_text.done" => Cow::Borrowed("response.output_text.done"),
+            "response.output_item.added" => Cow::Borrowed("response.output_item.added"),
+            "response.output_item.done" => Cow::Borrowed("response.output_item.done"),
+            "response.content_part.done" => Cow::Borrowed("response.content_part.done"),
+            "response.function_call_arguments.delta" => {
+                Cow::Borrowed("response.function_call_arguments.delta")
+            }
+            "response.reasoning_text.delta" => {
+                Cow::Borrowed("response.reasoning_text.delta")
+            }
+            "response.reasoning_text.done" => Cow::Borrowed("response.reasoning_text.done"),
+            "response.reasoning_summary_text.delta" => {
+                Cow::Borrowed("response.reasoning_summary_text.delta")
+            }
+            "response.reasoning_summary_text.done" => {
+                Cow::Borrowed("response.reasoning_summary_text.done")
+            }
+            "response.reasoning_summary_part.done" => {
+                Cow::Borrowed("response.reasoning_summary_part.done")
+            }
+            "response.created" => Cow::Borrowed("response.created"),
+            // Common shared events
             "ping" => Cow::Borrowed("ping"),
             "error" => Cow::Borrowed("error"),
             _ => Cow::Owned(value.to_string()),
