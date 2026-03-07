@@ -365,7 +365,7 @@ impl Response {
                 .map_or_else(wall_now, |timer| timer.now());
 
             let elapsed =
-                std::time::Duration::from_millis(asupersync_now.duration_since(start_time));
+                std::time::Duration::from_nanos(asupersync_now.duration_since(start_time));
             if elapsed >= timeout {
                 return Err(Error::api("Request timed out reading body"));
             }

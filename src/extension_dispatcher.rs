@@ -40,6 +40,16 @@ use crate::hostcall_io_uring_lane::{
 use crate::scheduler::{Clock as SchedulerClock, HostcallOutcome, WallClock};
 use crate::tools::ToolRegistry;
 
+fn extension_wait_now() -> asupersync::types::Time {
+    Cx::current()
+        .and_then(|cx| cx.timer_driver())
+        .map_or_else(wall_now, |driver| driver.now())
+}
+
+fn extension_wait_sleep(duration: Duration) -> asupersync::time::Sleep {
+    sleep(extension_wait_now(), duration)
+}
+
 /// Coordinates hostcall dispatch between the JS extension runtime and Rust handlers.
 pub struct ExtensionDispatcher<C: SchedulerClock = WallClock> {
     /// Runtime bridge used by the dispatcher.
@@ -2848,7 +2858,7 @@ impl<C: SchedulerClock + 'static> ExtensionDispatcher<C> {
                         };
                     }
                     Err(mpsc::TryRecvError::Empty) => {
-                        sleep(wall_now(), Duration::from_millis(25)).await;
+                        extension_wait_sleep(Duration::from_millis(25)).await;
                     }
                     Err(mpsc::TryRecvError::Disconnected) => {
                         return HostcallOutcome::Error {
@@ -3519,16 +3529,12 @@ impl<C: SchedulerClock + 'static> ExtensionDispatcher<C> {
             })
             .await?;
 
-        let start = Cx::current()
-            .and_then(|cx| cx.timer_driver())
-            .map_or_else(wall_now, |t| t.now());
+        let start = extension_wait_now();
         let timeout = Duration::from_millis(timeout_ms.max(1));
 
         loop {
-            let now = Cx::current()
-                .and_then(|cx| cx.timer_driver())
-                .map_or_else(wall_now, |t| t.now());
-            if std::time::Duration::from_millis(now.duration_since(start)) > timeout {
+            let now = extension_wait_now();
+            if std::time::Duration::from_nanos(now.duration_since(start)) > timeout {
                 return Err(crate::error::Error::extension(format!(
                     "events.emit timed out after {}ms",
                     timeout.as_millis()
@@ -3563,7 +3569,7 @@ impl<C: SchedulerClock + 'static> ExtensionDispatcher<C> {
             match state.status.as_str() {
                 "pending" => {
                     if !self.js_runtime().has_pending() {
-                        sleep(wall_now(), Duration::from_millis(1)).await;
+                        extension_wait_sleep(Duration::from_millis(1)).await;
                     }
                 }
                 "resolved" => return Ok(state.value.unwrap_or(Value::Null)),
@@ -3592,7 +3598,7 @@ impl<C: SchedulerClock + 'static> ExtensionDispatcher<C> {
                 }
             }
 
-            sleep(wall_now(), Duration::from_millis(0)).await;
+            extension_wait_sleep(Duration::from_millis(0)).await;
         }
     }
 }
@@ -3642,6 +3648,32 @@ mod tests {
     use std::net::TcpListener;
     use std::path::Path;
     use std::sync::Mutex;
+
+    #[test]
+    fn extension_wait_sleep_uses_current_timer_driver_epoch() {
+        use asupersync::time::{TimerDriverHandle, VirtualClock};
+        use asupersync::types::{Budget, RegionId, TaskId, Time};
+        use std::sync::Arc;
+
+        let virtual_clock = Arc::new(VirtualClock::starting_at(Time::from_secs(42)));
+        let timer_driver = TimerDriverHandle::with_virtual_clock(virtual_clock);
+        let cx = Cx::new_with_drivers(
+            RegionId::new_for_test(7, 0),
+            TaskId::new_for_test(9, 0),
+            Budget::INFINITE,
+            None,
+            None,
+            None,
+            Some(timer_driver.clone()),
+            None,
+        );
+        let _current = Cx::set_current(Some(cx));
+
+        let now = extension_wait_now();
+        assert_eq!(now, timer_driver.now());
+        let sleeper = extension_wait_sleep(Duration::from_millis(5));
+        assert_eq!(sleeper.remaining(now), Duration::from_millis(5));
+    }
 
     #[test]
     fn ui_confirm_cancel_defaults_to_false() {

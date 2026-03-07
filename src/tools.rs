@@ -1927,7 +1927,7 @@ pub(crate) async fn run_bash_command(
                 break; // Guard now owns no child after kill()
             }
         } else if let Some(timeout) = timeout {
-            let elapsed = std::time::Duration::from_millis(now.duration_since(start));
+            let elapsed = std::time::Duration::from_nanos(now.duration_since(start));
             if elapsed >= timeout {
                 timed_out = true;
                 let pid = guard.child.as_ref().map(std::process::Child::id);

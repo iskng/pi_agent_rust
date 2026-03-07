@@ -54,6 +54,16 @@ use std::time::{Duration, Instant};
 use url::Url;
 use uuid::Uuid;
 
+fn extension_wait_now() -> asupersync::types::Time {
+    Cx::current()
+        .and_then(|current| current.timer_driver())
+        .map_or_else(wall_now, |driver| driver.now())
+}
+
+fn extension_wait_sleep(duration: Duration) -> asupersync::time::Sleep {
+    sleep(extension_wait_now(), duration)
+}
+
 /// Canonicalize a path, stripping the `\\?\` verbatim prefix on Windows.
 ///
 /// `std::fs::canonicalize` on Windows returns extended-length paths (`\\?\C:\...`)
@@ -23481,10 +23491,11 @@ async fn await_js_task(
         Snapshot(Value),
     }
 
-    let start = Instant::now();
+    let start = extension_wait_now();
 
     loop {
-        if start.elapsed() > timeout {
+        let now = extension_wait_now();
+        if Duration::from_nanos(now.duration_since(start)) > timeout {
             return Err(Error::extension(format!(
                 "JS task timed out after {}ms",
                 timeout.as_millis()
@@ -23553,7 +23564,7 @@ async fn await_js_task(
             }
             TaskTakeResult::Pending => {
                 if !runtime.has_pending() {
-                    sleep(wall_now(), Duration::from_millis(1)).await;
+                    extension_wait_sleep(Duration::from_millis(1)).await;
                 }
             }
             TaskTakeResult::Resolved(value) => return Ok(value),
@@ -23580,7 +23591,7 @@ async fn await_js_task(
                 match state.status.as_str() {
                     "pending" => {
                         if !runtime.has_pending() {
-                            sleep(wall_now(), Duration::from_millis(1)).await;
+                            extension_wait_sleep(Duration::from_millis(1)).await;
                         }
                     }
                     "resolved" => return Ok(state.value.unwrap_or(Value::Null)),
@@ -28738,6 +28749,32 @@ mod tests {
     use super::*;
     use jsonschema::Validator;
     use tempfile::tempdir;
+
+    #[test]
+    fn extension_wait_sleep_uses_current_timer_driver_epoch() {
+        use asupersync::time::{TimerDriverHandle, VirtualClock};
+        use asupersync::types::{Budget, RegionId, TaskId, Time};
+        use std::sync::Arc;
+
+        let virtual_clock = Arc::new(VirtualClock::starting_at(Time::from_secs(42)));
+        let timer_driver = TimerDriverHandle::with_virtual_clock(virtual_clock);
+        let cx = Cx::new_with_drivers(
+            RegionId::new_for_test(7, 0),
+            TaskId::new_for_test(9, 0),
+            Budget::INFINITE,
+            None,
+            None,
+            None,
+            Some(timer_driver.clone()),
+            None,
+        );
+        let _current = Cx::set_current(Some(cx));
+
+        let now = extension_wait_now();
+        assert_eq!(now, timer_driver.now());
+        let sleeper = extension_wait_sleep(Duration::from_millis(5));
+        assert_eq!(sleeper.remaining(now), Duration::from_millis(5));
+    }
 
     fn compiled_extension_protocol_schema() -> Validator {
         let schema_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
