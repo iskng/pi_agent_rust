@@ -20,13 +20,15 @@ pub(super) async fn run_command_output(
     use std::sync::mpsc as std_mpsc;
     use std::time::Duration;
 
-    let child = Command::new(program)
+    let mut child = Command::new(program);
+    child
         .args(args)
         .current_dir(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
+        .stderr(Stdio::piped());
+    crate::tools::isolate_command_process_group(&mut child);
+    let child = child.spawn()?;
     let pid = child.id();
 
     let (tx, rx) = std_mpsc::channel();
@@ -40,7 +42,7 @@ pub(super) async fn run_command_output(
     let tick = Duration::from_millis(10);
     loop {
         if abort_signal.is_aborted() {
-            crate::tools::kill_process_tree(Some(pid));
+            crate::tools::kill_process_group_tree(Some(pid));
             return Err(std::io::Error::new(
                 std::io::ErrorKind::Interrupted,
                 "command aborted",

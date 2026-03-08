@@ -966,6 +966,72 @@ fn rpc_bash_nonzero_exit() {
     });
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn rpc_abort_bash_kills_background_children() {
+    let harness = TestHarness::new("rpc_abort_bash_kills_background_children");
+    let cassette_dir = cassette_root();
+    let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+        .build()
+        .expect("build test runtime");
+    let handle = runtime.handle();
+
+    runtime.block_on(async move {
+        let agent_session = build_agent_session(Session::in_memory(), &cassette_dir);
+        let options = build_options(&handle, harness.temp_path("auth.json"), vec![], vec![]);
+        let (in_tx, in_rx) = asupersync::channel::mpsc::channel::<String>(16);
+        let (out_tx, out_rx) = std::sync::mpsc::channel::<String>();
+        let out_rx = Arc::new(Mutex::new(out_rx));
+
+        let server = handle.spawn(async move { run(agent_session, options, in_rx, out_tx).await });
+
+        let marker = harness.temp_path("rpc_bash_survived.txt");
+        let marker_str = marker.to_string_lossy();
+        let command = format!(
+            r#"{{"id":"1","type":"bash","command":"(sleep 3; echo leaked > '{marker_str}') & sleep 30"}}"#
+        );
+        let cx = asupersync::Cx::for_testing();
+        in_tx
+            .send(&cx, command)
+            .await
+            .expect("send long-running bash");
+
+        asupersync::time::sleep(
+            asupersync::time::wall_now(),
+            Duration::from_millis(100),
+        )
+        .await;
+
+        let abort_resp = send_recv(
+            &in_tx,
+            &out_rx,
+            r#"{"id":"2","type":"abort_bash"}"#,
+            "abort_bash(running)",
+        )
+        .await;
+        assert_ok(&abort_resp, "abort_bash");
+
+        let bash_resp = parse_response(
+            &recv_line(&out_rx, "bash(aborted)")
+                .await
+                .expect("receive aborted bash response"),
+        );
+        assert_ok(&bash_resp, "bash");
+        assert_eq!(bash_resp["id"], "1");
+        assert_eq!(bash_resp["data"]["cancelled"], true);
+
+        std::thread::sleep(Duration::from_secs(4));
+        assert!(
+            !marker.exists(),
+            "background child survived rpc abort"
+        );
+
+        drop(in_tx);
+        let result = server.await;
+        assert!(result.is_ok(), "rpc server error: {result:?}");
+    });
+}
+
 // ---------------------------------------------------------------------------
 // Tests: Request ID handling
 // ---------------------------------------------------------------------------

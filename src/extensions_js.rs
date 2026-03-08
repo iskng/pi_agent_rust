@@ -14754,6 +14754,7 @@ impl<C: SchedulerClock + 'static> PiJsRuntime<C> {
                                     .stdin(Stdio::null())
                                     .stdout(Stdio::piped())
                                     .stderr(Stdio::piped());
+                                crate::tools::isolate_command_process_group(&mut command);
 
                                 let mut child = command.spawn().map_err(|e| e.to_string())?;
                                 let pid = child.id();
@@ -14816,14 +14817,14 @@ impl<C: SchedulerClock + 'static> PiJsRuntime<C> {
                                     }
                                     if !killed && limit_exceeded.load(AtomicOrdering::Relaxed) {
                                         killed = true;
-                                        crate::tools::kill_process_tree(Some(pid));
+                                        crate::tools::kill_process_group_tree(Some(pid));
                                         let _ = child.kill();
                                         break child.wait().map_err(|e| e.to_string())?;
                                     }
                                     if let Some(t) = timeout {
                                         if !killed && start.elapsed() >= t {
                                             killed = true;
-                                            crate::tools::kill_process_tree(Some(pid));
+                                            crate::tools::kill_process_group_tree(Some(pid));
                                             let _ = child.kill();
                                             break child.wait().map_err(|e| e.to_string())?;
                                         }

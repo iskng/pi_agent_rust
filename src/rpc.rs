@@ -3515,13 +3515,16 @@ async fn run_bash_rpc(
 
     let command = format!("trap 'code=$?; wait; exit $code' EXIT\n{command}");
 
-    let mut child = std::process::Command::new(shell)
+    let mut child = std::process::Command::new(shell);
+    child
         .arg("-c")
         .arg(&command)
         .current_dir(cwd)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    crate::tools::isolate_command_process_group(&mut child);
+    let mut child = child
         .spawn()
         .map_err(|e| Error::tool("bash", format!("Failed to spawn shell: {e}")))?;
 
@@ -3532,7 +3535,8 @@ async fn run_bash_rpc(
         return Err(Error::tool("bash", "Missing stderr".to_string()));
     };
 
-    let mut guard = crate::tools::ProcessGuard::new(child, true);
+    let mut guard =
+        crate::tools::ProcessGuard::new(child, crate::tools::ProcessCleanupMode::ProcessGroupTree);
 
     let (tx, rx) = std::sync::mpsc::sync_channel::<StreamChunk>(128);
     let tx_stdout = tx.clone();

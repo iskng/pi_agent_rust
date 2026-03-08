@@ -2737,6 +2737,7 @@ impl<C: SchedulerClock + 'static> ExtensionDispatcher<C> {
                         .stdout(Stdio::piped())
                         .stderr(Stdio::piped())
                         .current_dir(&cwd);
+                    crate::tools::isolate_command_process_group(&mut command);
 
                     let mut child = command.spawn().map_err(|err| err.to_string())?;
                     let pid = child.id();
@@ -2760,7 +2761,7 @@ impl<C: SchedulerClock + 'static> ExtensionDispatcher<C> {
 
                         if !killed && cancel_worker.load(AtomicOrdering::SeqCst) {
                             killed = true;
-                            crate::tools::kill_process_tree(Some(pid));
+                            crate::tools::kill_process_group_tree(Some(pid));
                             let _ = child.kill();
                             break child.wait().map_err(|err| err.to_string())?;
                         }
@@ -2768,7 +2769,7 @@ impl<C: SchedulerClock + 'static> ExtensionDispatcher<C> {
                         if let Some(timeout_ms) = timeout_ms {
                             if !killed && start.elapsed() >= Duration::from_millis(timeout_ms) {
                                 killed = true;
-                                crate::tools::kill_process_tree(Some(pid));
+                                crate::tools::kill_process_group_tree(Some(pid));
                                 let _ = child.kill();
                                 break child.wait().map_err(|err| err.to_string())?;
                             }
@@ -2918,6 +2919,7 @@ impl<C: SchedulerClock + 'static> ExtensionDispatcher<C> {
                     .stdout(Stdio::piped())
                     .stderr(Stdio::piped())
                     .current_dir(&cwd);
+                crate::tools::isolate_command_process_group(&mut command);
 
                 let mut child = command.spawn().map_err(|err| err.to_string())?;
                 let pid = child.id();
@@ -2974,7 +2976,7 @@ impl<C: SchedulerClock + 'static> ExtensionDispatcher<C> {
                     if let Some(timeout_ms) = timeout_ms {
                         if !killed && start.elapsed() >= Duration::from_millis(timeout_ms) {
                             killed = true;
-                            crate::tools::kill_process_tree(Some(pid));
+                            crate::tools::kill_process_group_tree(Some(pid));
                             let _ = child.kill();
                             break child.wait().map_err(|err| err.to_string())?;
                         }

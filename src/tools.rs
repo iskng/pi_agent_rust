@@ -4513,10 +4513,7 @@ pub(crate) enum ProcessCleanupMode {
 }
 
 impl ProcessGuard {
-    pub(crate) const fn new(
-        child: std::process::Child,
-        cleanup_mode: ProcessCleanupMode,
-    ) -> Self {
+    pub(crate) const fn new(child: std::process::Child, cleanup_mode: ProcessCleanupMode) -> Self {
         Self {
             child: Some(child),
             cleanup_mode,
@@ -4582,11 +4579,7 @@ fn terminate_process_group_tree(pid: Option<u32>) {
     kill_process_tree_with(pid, sysinfo::Signal::Term, true);
 }
 
-fn kill_process_tree_with(
-    pid: Option<u32>,
-    signal: sysinfo::Signal,
-    include_process_group: bool,
-) {
+fn kill_process_tree_with(pid: Option<u32>, signal: sysinfo::Signal, include_process_group: bool) {
     let Some(pid) = pid else {
         return;
     };
@@ -5129,7 +5122,8 @@ impl Tool for HashlineEditTool {
         let raw_content = String::from_utf8(raw).map_err(|_| {
             Error::tool(
                 "hashline_edit",
-                "File contains invalid UTF-8 characters and cannot be safely edited as text.".to_string(),
+                "File contains invalid UTF-8 characters and cannot be safely edited as text."
+                    .to_string(),
             )
         })?;
 
