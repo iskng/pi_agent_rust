@@ -421,7 +421,9 @@ impl PiApp {
             if total_lines > effective_vp {
                 let total = total_lines.saturating_sub(effective_vp);
                 let percent = (start * 100).checked_div(total).map_or(100, |p| p.min(100));
-                let indicator = format!("  [{percent}%] ↑/↓ PgUp/PgDn to scroll");
+                let indicator = format!(
+                    "  [{percent}%] ↑/↓ PgUp/PgDn Shift+Up/Down to scroll"
+                );
                 output.push_str(&self.styles.muted.render(&indicator));
                 output.push('\n');
             }

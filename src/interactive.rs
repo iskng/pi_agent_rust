@@ -20,8 +20,8 @@ use bubbles::spinner::{SpinnerModel, TickMsg as SpinnerTickMsg, spinners};
 use bubbles::textarea::TextArea;
 use bubbles::viewport::Viewport;
 use bubbletea::{
-    Cmd, KeyMsg, KeyType, Message, Model as BubbleteaModel, Program, WindowSizeMsg, batch, quit,
-    sequence,
+    Cmd, KeyMsg, KeyType, Message, Model as BubbleteaModel, MouseButton, MouseMsg, Program,
+    WindowSizeMsg, batch, quit, sequence,
 };
 use chrono::Utc;
 use crossterm::{cursor, terminal};
@@ -134,6 +134,150 @@ use self::tree::{
 };
 
 // ============================================================================
+// Tmux wheel scroll guard
+// ============================================================================
+
+/// RAII guard that overrides tmux WheelUp/WheelDown bindings for the current
+/// pane so that mouse wheel events are forwarded to the application instead of
+/// triggering tmux copy-mode.  When dropped (including on panic), the original
+/// bindings are restored.
+///
+/// The override is pane-scoped: other panes in the same tmux session are not
+/// affected.  If `PI_TMUX_WHEEL_OVERRIDE=0` is set, no override is installed.
+struct TmuxWheelGuard {
+    /// The tmux pane identifier (e.g. "%3") used for the `-t` flag.
+    pane: String,
+    /// Original WheelUp binding (None if there was no binding).
+    saved_wheel_up: Option<String>,
+    /// Original WheelDown binding (None if there was no binding).
+    saved_wheel_down: Option<String>,
+}
+
+impl TmuxWheelGuard {
+    /// Attempt to install pane-scoped tmux wheel overrides.
+    ///
+    /// Returns `None` if:
+    /// - Not running inside tmux (`$TMUX` unset)
+    /// - `PI_TMUX_WHEEL_OVERRIDE=0` env is set
+    /// - `tmux` binary is not available or returns errors
+    fn install() -> Option<Self> {
+        // Respect opt-out env var.
+        if std::env::var("PI_TMUX_WHEEL_OVERRIDE")
+            .ok()
+            .is_some_and(|v| v == "0")
+        {
+            return None;
+        }
+
+        // Check if we're in tmux.
+        if std::env::var_os("TMUX").is_none() {
+            return None;
+        }
+
+        // Get the current pane ID.
+        let pane = std::process::Command::new("tmux")
+            .args(["display-message", "-p", "#{pane_id}"])
+            .output()
+            .ok()
+            .and_then(|o| {
+                if o.status.success() {
+                    String::from_utf8(o.stdout)
+                        .ok()
+                        .map(|s| s.trim().to_string())
+                } else {
+                    None
+                }
+            })?;
+
+        if pane.is_empty() {
+            return None;
+        }
+
+        // Save existing WheelUp/WheelDown bindings so we can restore them.
+        let saved_wheel_up = Self::get_binding("WheelUp");
+        let saved_wheel_down = Self::get_binding("WheelDown");
+
+        // Override WheelUp and WheelDown for this pane to send-keys
+        // (i.e. forward the escape sequences to the application).
+        let _ = std::process::Command::new("tmux")
+            .args([
+                "bind-key",
+                "-T",
+                "root",
+                "WheelUpPane",
+                "send-keys",
+                "-M",
+            ])
+            .status();
+        let _ = std::process::Command::new("tmux")
+            .args([
+                "bind-key",
+                "-T",
+                "root",
+                "WheelDownPane",
+                "send-keys",
+                "-M",
+            ])
+            .status();
+
+        Some(Self {
+            pane,
+            saved_wheel_up,
+            saved_wheel_down,
+        })
+    }
+
+    /// Query the current tmux binding for a key in the root table.
+    fn get_binding(key: &str) -> Option<String> {
+        let output = std::process::Command::new("tmux")
+            .args(["list-keys", "-T", "root"])
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // Each line looks like: bind-key    -T root    WheelUpPane    if-shell -F ...
+        // We search for lines containing the key name.
+        let search = format!(" {key}");
+        for line in stdout.lines() {
+            if line.contains(&search) {
+                return Some(line.trim().to_string());
+            }
+        }
+        None
+    }
+
+    /// Restore the original binding for a wheel direction, or unbind if there
+    /// was no previous binding.
+    fn restore_binding(saved: &Option<String>, key_name: &str) {
+        if let Some(ref line) = saved {
+            // Try to re-execute the original bind-key line.
+            // The saved line is a full `bind-key -T root ...` command.
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 4 {
+                // Re-run the full bind-key command via tmux.
+                let _ = std::process::Command::new("tmux")
+                    .args(&parts)
+                    .status();
+            }
+        } else {
+            // No previous binding — unbind to revert to tmux default behavior.
+            let _ = std::process::Command::new("tmux")
+                .args(["unbind-key", "-T", "root", key_name])
+                .status();
+        }
+    }
+}
+
+impl Drop for TmuxWheelGuard {
+    fn drop(&mut self) {
+        Self::restore_binding(&self.saved_wheel_up, "WheelUpPane");
+        Self::restore_binding(&self.saved_wheel_down, "WheelDownPane");
+    }
+}
+
+// ============================================================================
 // Helpers
 // ============================================================================
 
@@ -234,6 +378,87 @@ impl PiApp {
             self.conversation_viewport.goto_bottom();
             self.follow_stream_tail = true;
         }
+    }
+
+    /// Handle a mouse wheel event, routing it to the appropriate overlay or
+    /// the conversation viewport.  Returns `None` (no command needed).
+    fn handle_mouse_wheel(&mut self, is_up: bool) -> Option<Cmd> {
+        // Priority 1: tree UI captures everything.
+        if self.tree_ui.is_some() {
+            // Tree UI has its own scroll; we don't intercept here.
+            return None;
+        }
+
+        // Priority 2: model selector overlay.
+        if let Some(ref mut selector) = self.model_selector {
+            if is_up {
+                selector.select_prev();
+            } else {
+                selector.select_next();
+            }
+            return None;
+        }
+
+        // Priority 3: session picker overlay.
+        if let Some(ref mut picker) = self.session_picker {
+            if is_up {
+                picker.select_prev();
+            } else {
+                picker.select_next();
+            }
+            return None;
+        }
+
+        // Priority 4: settings UI overlay.
+        if let Some(ref mut settings) = self.settings_ui {
+            if is_up {
+                settings.select_prev();
+            } else {
+                settings.select_next();
+            }
+            return None;
+        }
+
+        // Priority 5: theme picker overlay.
+        if let Some(ref mut picker) = self.theme_picker {
+            if is_up {
+                picker.select_prev();
+            } else {
+                picker.select_next();
+            }
+            return None;
+        }
+
+        // Priority 6: branch picker overlay.
+        if let Some(ref mut picker) = self.branch_picker {
+            if is_up {
+                picker.select_prev();
+            } else {
+                picker.select_next();
+            }
+            return None;
+        }
+
+        // No overlay open: scroll the conversation viewport.
+        // Sync content before scrolling (same pattern as PageUp/PageDown).
+        let saved_offset = self.conversation_viewport.y_offset();
+        let content = self.build_conversation_content();
+        let effective = self.view_effective_conversation_height().max(1);
+        self.conversation_viewport.height = effective;
+        self.conversation_viewport.set_content(content.trim_end());
+        self.conversation_viewport.set_y_offset(saved_offset);
+
+        if is_up {
+            self.conversation_viewport.scroll_up(1);
+            self.follow_stream_tail = false;
+        } else {
+            self.conversation_viewport.scroll_down(1);
+            // Re-enable auto-follow if scrolled back to the bottom.
+            if self.is_at_bottom() {
+                self.follow_stream_tail = true;
+            }
+        }
+        None
     }
 
     fn apply_theme(&mut self, theme: Theme) {
@@ -894,6 +1119,31 @@ impl PiApp {
             chrome += 3 + visible + 2; // title + header + separator + items + help + blank
         }
 
+        // Model selector overlay: title + config-only hint + search + separator + items + detail + help + padding.
+        if let Some(ref selector) = self.model_selector {
+            let visible = selector.max_visible().min(selector.filtered_len().max(1));
+            // ~6 lines of chrome (title, optional hint, search, separator, detail/status, help)
+            chrome += visible + 6;
+        }
+
+        // Session picker overlay: title + search + separator + items + help + padding.
+        if let Some(ref picker) = self.session_picker {
+            let visible = picker.sessions.len().min(picker.max_visible);
+            chrome += visible + 6; // title + blank + search + separator + items + help + blank
+        }
+
+        // Settings UI overlay: title + items + help + padding.
+        if let Some(ref settings) = self.settings_ui {
+            let visible = settings.entries.len().min(settings.max_visible);
+            chrome += visible + 5; // title + blank + items + help + blank
+        }
+
+        // Theme picker overlay: title + items + help + padding.
+        if let Some(ref picker) = self.theme_picker {
+            let visible = picker.items.len().min(picker.max_visible);
+            chrome += visible + 5; // title + blank + items + help + blank
+        }
+
         // Input area vs processing spinner.
         if self.editor_input_is_available() {
             // render_input: "\n  header\n" (2 rows) + input.height() rows.
@@ -933,7 +1183,7 @@ impl PiApp {
         let viewport_height = self.conversation_viewport_height();
         let mut viewport = Viewport::new(self.term_width.saturating_sub(2), viewport_height);
         viewport.mouse_wheel_enabled = true;
-        viewport.mouse_wheel_delta = 3;
+        viewport.mouse_wheel_delta = 1;
         self.conversation_viewport = viewport;
         self.scroll_to_bottom();
     }
@@ -1260,6 +1510,7 @@ pub async fn run_interactive(
 
     Program::new(app)
         .with_alt_screen()
+        .with_mouse_all_motion()
         .with_input_receiver(ui_rx)
         .run()?;
 
@@ -1511,6 +1762,10 @@ pub struct PiApp {
     git_branch: Option<String>,
     // Startup banner shown in an empty conversation.
     startup_welcome: String,
+
+    // RAII guard for tmux wheel scroll override (dropped on exit/panic).
+    #[allow(dead_code)]
+    tmux_wheel_guard: Option<TmuxWheelGuard>,
 }
 
 impl PiApp {
@@ -1583,7 +1838,7 @@ impl PiApp {
         let mut conversation_viewport =
             Viewport::new(term_width.saturating_sub(2), viewport_height);
         conversation_viewport.mouse_wheel_enabled = true;
-        conversation_viewport.mouse_wheel_delta = 3;
+        conversation_viewport.mouse_wheel_delta = 1;
 
         let model = format!(
             "{}/{}",
@@ -1737,6 +1992,7 @@ impl PiApp {
             render_buffers: RenderBuffers::new(),
             git_branch,
             startup_welcome,
+            tmux_wheel_guard: TmuxWheelGuard::install(),
         };
 
         if let Some(manager) = app.extensions.clone() {
@@ -1922,6 +2178,18 @@ impl PiApp {
         if let Some(size) = msg.downcast_ref::<WindowSizeMsg>() {
             self.set_terminal_size(size.width as usize, size.height as usize);
             return None;
+        }
+
+        // Handle mouse wheel events: route to overlays when open, otherwise
+        // scroll the conversation viewport.
+        if let Some(mouse) = msg.downcast_ref::<MouseMsg>() {
+            if mouse.is_wheel()
+                && (mouse.button == MouseButton::WheelUp
+                    || mouse.button == MouseButton::WheelDown)
+            {
+                let is_up = mouse.button == MouseButton::WheelUp;
+                return self.handle_mouse_wheel(is_up);
+            }
         }
 
         // Ignore spinner ticks when no spinner row is visible so old tick
