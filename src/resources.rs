@@ -1917,11 +1917,11 @@ mod tests {
             source: "user".to_string(),
             file_path: PathBuf::from("/tmp/review.md"),
         };
-        let out = expand_prompt_template("/review foo", &[template]);
+        let out = expand_prompt_template("/review foo", std::slice::from_ref(&template));
         assert_eq!(out, "Review foo");
-        let tab_out = expand_prompt_template("/review\tfoo", &[template.clone()]);
+        let tab_out = expand_prompt_template("/review\tfoo", std::slice::from_ref(&template));
         assert_eq!(tab_out, "Review foo");
-        let newline_out = expand_prompt_template("/review\nfoo", &[template]);
+        let newline_out = expand_prompt_template("/review\nfoo", std::slice::from_ref(&template));
         assert_eq!(newline_out, "Review foo");
     }
 
