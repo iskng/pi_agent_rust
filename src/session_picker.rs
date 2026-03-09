@@ -16,6 +16,8 @@ use serde::Deserialize;
 use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::session::{Session, SessionHeader, encode_cwd};
+#[cfg(feature = "sqlite-sessions")]
+use crate::session_index::session_file_stats;
 use crate::session_index::{SessionIndex, SessionMeta};
 use crate::theme::{Theme, TuiStyles};
 
@@ -489,14 +491,7 @@ fn build_meta_from_sqlite(path: &Path) -> crate::error::Result<SessionMeta> {
     })?;
     let header = meta.header;
 
-    let sqlite_meta = fs::metadata(path)?;
-    let size_bytes = sqlite_meta.len();
-    let modified = sqlite_meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
-    let millis = modified
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
-    let last_modified_ms = i64::try_from(millis).unwrap_or(i64::MAX);
+    let (last_modified_ms, size_bytes) = session_file_stats(path)?;
 
     Ok(SessionMeta {
         path: path.display().to_string(),
@@ -627,6 +622,15 @@ fn try_trash_with_cmd(path: &Path, trash_cmd: &str) -> bool {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "sqlite-sessions")]
+    use crate::model::UserContent;
+    #[cfg(feature = "sqlite-sessions")]
+    use crate::session::{SessionMessage, SessionStoreKind};
+    #[cfg(feature = "sqlite-sessions")]
+    use asupersync::runtime::RuntimeBuilder;
+    #[cfg(feature = "sqlite-sessions")]
+    use std::future::Future;
+
     fn make_meta(path: &Path) -> SessionMeta {
         SessionMeta {
             path: path.display().to_string(),
@@ -647,6 +651,14 @@ mod tests {
             alt: false,
             paste: false,
         })
+    }
+
+    #[cfg(feature = "sqlite-sessions")]
+    fn run_async<T>(future: impl Future<Output = T>) -> T {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("build runtime");
+        runtime.block_on(future)
     }
 
     #[test]
@@ -1081,6 +1093,53 @@ mod tests {
     fn scan_sessions_on_disk_nonexistent_dir_returns_empty() {
         let found = scan_sessions_on_disk(Path::new("/nonexistent/dir"));
         assert!(found.is_empty());
+    }
+
+    #[cfg(feature = "sqlite-sessions")]
+    #[test]
+    fn build_meta_from_sqlite_includes_wal_and_shm_stats() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut session = Session::create_with_dir_and_store(
+            Some(tmp.path().to_path_buf()),
+            SessionStoreKind::Sqlite,
+        );
+        session.append_message(SessionMessage::User {
+            content: UserContent::Text("sqlite".to_string()),
+            timestamp: Some(0),
+        });
+        run_async(async { session.save().await }).expect("save sqlite session");
+
+        let session_path = session.path.clone().expect("sqlite session path");
+        let base_size = fs::metadata(&session_path).expect("sqlite metadata").len();
+        let [wal_path, shm_path] = sqlite_auxiliary_paths(&session_path);
+
+        std::thread::sleep(std::time::Duration::from_millis(1_100));
+        fs::write(&wal_path, b"walpayload").expect("write sqlite wal");
+        fs::write(&shm_path, b"shm!").expect("write sqlite shm");
+
+        let wal_ms = fs::metadata(&wal_path)
+            .expect("wal metadata")
+            .modified()
+            .expect("wal modified")
+            .duration_since(UNIX_EPOCH)
+            .expect("wal since epoch")
+            .as_millis();
+        let shm_ms = fs::metadata(&shm_path)
+            .expect("shm metadata")
+            .modified()
+            .expect("shm modified")
+            .duration_since(UNIX_EPOCH)
+            .expect("shm since epoch")
+            .as_millis();
+
+        let meta = build_meta_from_sqlite(&session_path).expect("sqlite meta");
+
+        assert_eq!(meta.message_count, 1);
+        assert_eq!(meta.size_bytes, base_size + 10 + 4);
+        assert_eq!(
+            meta.last_modified_ms,
+            i64::try_from(wal_ms.max(shm_ms)).expect("mtime fits in i64")
+        );
     }
 
     // ── with_theme_and_root constructor ────────────────────────────────

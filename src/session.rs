@@ -12,7 +12,9 @@ use crate::model::{
     AssistantMessage, ContentBlock, Message, TextContent, ToolResultMessage, UserContent,
     UserMessage,
 };
-use crate::session_index::{SessionIndex, enqueue_session_index_snapshot_update};
+use crate::session_index::{
+    SessionIndex, enqueue_session_index_snapshot_update, session_file_stats,
+};
 use crate::session_store_v2::{self, SessionStoreV2};
 use crate::tui::PiConsole;
 use asupersync::channel::oneshot;
@@ -2738,21 +2740,11 @@ async fn scan_sessions_on_disk(
                     if is_session_file_path(&path) {
                         // Optimization: if we already have this file indexed and both mtime and
                         // size match, reuse indexed metadata to avoid a full parse.
-                        if let Ok(metadata) = std::fs::metadata(&path) {
-                            let disk_size = metadata.len();
-                            if let Ok(modified) = metadata.modified() {
-                                #[allow(clippy::cast_possible_truncation)]
-                                let disk_ms = modified
-                                    .duration_since(UNIX_EPOCH)
-                                    .unwrap_or_default()
-                                    .as_millis()
-                                    as i64;
-
-                                if let Some(known_entry) = known_map.get(&path) {
-                                    if can_reuse_known_entry(known_entry, disk_ms, disk_size) {
-                                        entries.push(known_entry.clone());
-                                        continue;
-                                    }
+                        if let Ok((disk_ms, disk_size)) = session_file_stats(&path) {
+                            if let Some(known_entry) = known_map.get(&path) {
+                                if can_reuse_known_entry(known_entry, disk_ms, disk_size) {
+                                    entries.push(known_entry.clone());
+                                    continue;
                                 }
                             }
                         }
@@ -2834,15 +2826,7 @@ fn load_session_meta_jsonl(path: &Path) -> Result<SessionPickEntry> {
         }
     }
 
-    let metadata = std::fs::metadata(path)
-        .map_err(|e| Error::session(format!("Failed to stat session: {e}")))?;
-    let size_bytes = metadata.len();
-    let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
-    #[allow(clippy::cast_possible_truncation)]
-    let last_modified_ms = modified
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64; // i64::MAX ms = ~292 million years, so truncation is safe
+    let (last_modified_ms, size_bytes) = session_file_stats(path)?;
 
     Ok(SessionPickEntry {
         path: path.to_path_buf(),
@@ -2862,15 +2846,7 @@ fn load_session_meta_sqlite(path: &Path) -> Result<SessionPickEntry> {
     })?;
     let header = meta.header;
 
-    let metadata = std::fs::metadata(path)
-        .map_err(|e| Error::session(format!("Failed to stat session: {e}")))?;
-    let size_bytes = metadata.len();
-    let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
-    #[allow(clippy::cast_possible_truncation)]
-    let last_modified_ms = modified
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64; // i64::MAX ms = ~292 million years, so truncation is safe
+    let (last_modified_ms, size_bytes) = session_file_stats(path)?;
 
     Ok(SessionPickEntry {
         path: path.to_path_buf(),
@@ -6574,6 +6550,76 @@ mod tests {
         assert_eq!(scanned[0].path, path);
         assert_eq!(scanned[0].message_count, 2);
         assert_eq!(scanned[0].size_bytes, disk_size);
+    }
+
+    #[cfg(feature = "sqlite-sessions")]
+    #[test]
+    fn test_scan_sessions_on_disk_reloads_sqlite_when_wal_stats_change() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut session = Session::create_with_dir_and_store(
+            Some(temp.path().to_path_buf()),
+            SessionStoreKind::Sqlite,
+        );
+        session.append_message(make_test_message("sqlite"));
+
+        run_async(async { session.save().await }).unwrap();
+        let path = session.path.clone().expect("sqlite session path");
+        let session_dir = path.parent().expect("session parent").to_path_buf();
+        let (base_ms, base_size) = session_file_stats(&path).expect("base stats");
+
+        let mut wal_path = path.as_os_str().to_os_string();
+        wal_path.push("-wal");
+        let wal_path = PathBuf::from(wal_path);
+        std::thread::sleep(std::time::Duration::from_millis(1_100));
+        std::fs::write(&wal_path, b"walpayload").expect("write sqlite wal");
+
+        let stale_known_entry = SessionPickEntry {
+            path: path.clone(),
+            id: session.header.id.clone(),
+            timestamp: session.header.timestamp.clone(),
+            message_count: 999,
+            name: Some("stale".to_string()),
+            last_modified_ms: base_ms,
+            size_bytes: base_size,
+        };
+
+        let scanned =
+            run_async(async { scan_sessions_on_disk(&session_dir, vec![stale_known_entry]).await })
+                .expect("scan sessions");
+        let (updated_ms, updated_size) = session_file_stats(&path).expect("updated stats");
+
+        assert_eq!(scanned.len(), 1);
+        assert_eq!(scanned[0].path, path);
+        assert_eq!(scanned[0].message_count, 1);
+        assert_eq!(scanned[0].size_bytes, updated_size);
+        assert_eq!(scanned[0].last_modified_ms, updated_ms);
+    }
+
+    #[cfg(feature = "sqlite-sessions")]
+    #[test]
+    fn test_load_session_meta_sqlite_uses_wal_aware_stats() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut session = Session::create_with_dir_and_store(
+            Some(temp.path().to_path_buf()),
+            SessionStoreKind::Sqlite,
+        );
+        session.append_message(make_test_message("sqlite"));
+
+        run_async(async { session.save().await }).unwrap();
+        let path = session.path.clone().expect("sqlite session path");
+
+        let mut wal_path = path.as_os_str().to_os_string();
+        wal_path.push("-wal");
+        let wal_path = PathBuf::from(wal_path);
+        std::thread::sleep(std::time::Duration::from_millis(1_100));
+        std::fs::write(&wal_path, b"walpayload").expect("write sqlite wal");
+
+        let meta = load_session_meta_sqlite(&path).expect("load sqlite meta");
+        let (expected_ms, expected_size) = session_file_stats(&path).expect("sqlite file stats");
+
+        assert_eq!(meta.path, path);
+        assert_eq!(meta.size_bytes, expected_size);
+        assert_eq!(meta.last_modified_ms, expected_ms);
     }
 
     // ======================================================================

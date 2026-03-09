@@ -64,7 +64,7 @@ impl SessionIndex {
         message_count: u64,
         name: Option<String>,
     ) -> Result<()> {
-        let (last_modified_ms, size_bytes) = file_stats(path)?;
+        let (last_modified_ms, size_bytes) = session_file_stats(path)?;
         let meta = SessionMeta {
             path: path.display().to_string(),
             id: header.id.clone(),
@@ -445,7 +445,7 @@ fn build_meta(
     entries: &[SessionEntry],
 ) -> Result<SessionMeta> {
     let (message_count, name) = session_stats(entries);
-    let (last_modified_ms, size_bytes) = file_stats(path)?;
+    let (last_modified_ms, size_bytes) = session_file_stats(path)?;
     Ok(SessionMeta {
         path: path.display().to_string(),
         id: header.id.clone(),
@@ -536,7 +536,7 @@ fn build_meta_from_sqlite(path: &Path) -> Result<SessionMeta> {
         crate::session_sqlite::load_session_meta(path).await
     })?;
     let header = meta.header;
-    let (last_modified_ms, size_bytes) = file_stats(path)?;
+    let (last_modified_ms, size_bytes) = session_file_stats(path)?;
 
     Ok(SessionMeta {
         path: path.display().to_string(),
@@ -579,7 +579,7 @@ fn sqlite_auxiliary_paths(path: &Path) -> [PathBuf; 2] {
     })
 }
 
-fn file_stats(path: &Path) -> Result<(i64, u64)> {
+pub(crate) fn session_file_stats(path: &Path) -> Result<(i64, u64)> {
     let meta = fs::metadata(path)?;
     let mut size = meta.len();
     let mut modified = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
@@ -1245,7 +1245,7 @@ mod tests {
         let path = harness.temp_path("test_file.txt");
         fs::write(&path, "hello world").expect("write");
 
-        let (last_modified_ms, size_bytes) = file_stats(&path).expect("file_stats");
+        let (last_modified_ms, size_bytes) = session_file_stats(&path).expect("file_stats");
         assert_eq!(size_bytes, 11); // "hello world" = 11 bytes
         assert!(last_modified_ms > 0, "Expected positive modification time");
     }
@@ -1261,7 +1261,7 @@ mod tests {
         fs::write(&wal_path, b"walpayload").expect("write sqlite wal");
         fs::write(&shm_path, b"shm!").expect("write sqlite shm");
 
-        let (_, size_bytes) = file_stats(&path).expect("file_stats");
+        let (_, size_bytes) = session_file_stats(&path).expect("file_stats");
         assert_eq!(size_bytes, 2 + 10 + 4);
     }
 
@@ -1319,7 +1319,7 @@ mod tests {
 
     #[test]
     fn file_stats_missing_file_returns_error() {
-        let err = file_stats(Path::new("/nonexistent/file.txt"));
+        let err = session_file_stats(Path::new("/nonexistent/file.txt"));
         assert!(err.is_err());
     }
 
