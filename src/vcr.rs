@@ -442,6 +442,12 @@ impl VcrRecorder {
                         debug.push('\n');
                     }
                 }
+                if let Some(body_text) = &request.body_text {
+                    let redacted = normalize_body_text_for_matching(&request.headers, body_text);
+                    let _ = writeln!(debug, "=== INCOMING TEXT (redacted) ===");
+                    debug.push_str(&redacted);
+                    debug.push('\n');
+                }
                 for (idx, interaction) in cassette.interactions.iter().enumerate() {
                     if let Some(body) = &interaction.request.body {
                         if let Ok(pretty) = serde_json::to_string_pretty(body) {
@@ -449,6 +455,15 @@ impl VcrRecorder {
                             debug.push_str(&pretty);
                             debug.push('\n');
                         }
+                    }
+                    if let Some(body_text) = &interaction.request.body_text {
+                        let redacted = normalize_body_text_for_matching(
+                            &interaction.request.headers,
+                            body_text,
+                        );
+                        let _ = writeln!(debug, "=== RECORDED TEXT [{idx}] ===");
+                        debug.push_str(&redacted);
+                        debug.push('\n');
                     }
                 }
                 let _ = std::fs::write(&debug_path, &debug);
@@ -471,8 +486,9 @@ impl VcrRecorder {
                 }
 
                 if let Some(body_text) = &request.body_text {
+                    let redacted = normalize_body_text_for_matching(&request.headers, body_text);
                     message.push_str("\nIncoming text body:\n");
-                    message.push_str(body_text);
+                    message.push_str(&redacted);
                     message.push('\n');
                 }
 
@@ -486,8 +502,12 @@ impl VcrRecorder {
                     }
 
                     if let Some(body_text) = &interaction.request.body_text {
+                        let redacted = normalize_body_text_for_matching(
+                            &interaction.request.headers,
+                            body_text,
+                        );
                         let _ = write!(message, "\nRecorded text body [{idx}]:\n");
-                        message.push_str(body_text);
+                        message.push_str(&redacted);
                         message.push('\n');
                     }
                 }
@@ -597,11 +617,12 @@ fn request_debug_key(request: &RecordedRequest) -> String {
     }
 
     if let Some(body_text) = &request.body_text {
-        let hash = short_sha256(body_text.as_bytes());
+        let normalized = normalize_body_text_for_matching(&request.headers, body_text);
+        let hash = short_sha256(normalized.as_bytes());
         let _ = write!(
             out,
             " body_text_sha256={hash} body_text_len={}",
-            body_text.len()
+            normalized.len()
         );
     } else {
         out.push_str(" body_text_sha256=<none>");
@@ -643,7 +664,12 @@ fn request_matches(recorded: &RecordedRequest, incoming: &RecordedRequest) -> bo
     // tests where the JSON body is dynamic (paths, timestamps, etc.) and the
     // cassette only wants to constrain method+URL (and optionally structured JSON).
     if let Some(recorded_text) = recorded.body_text.as_ref() {
-        if incoming.body_text.as_deref() != Some(recorded_text) {
+        let recorded_text = normalize_body_text_for_matching(&recorded.headers, recorded_text);
+        let incoming_text = incoming
+            .body_text
+            .as_deref()
+            .map(|text| normalize_body_text_for_matching(&incoming.headers, text));
+        if incoming_text.as_deref() != Some(recorded_text.as_str()) {
             return false;
         }
     }
@@ -712,6 +738,12 @@ pub fn redact_cassette(cassette: &mut Cassette) -> RedactionSummary {
         if let Some(body) = &mut interaction.request.body {
             summary.json_fields_redacted += redact_json(body);
         }
+        if let Some(body_text) = interaction.request.body_text.as_deref() {
+            interaction.request.body_text = Some(normalize_body_text_for_matching(
+                &interaction.request.headers,
+                body_text,
+            ));
+        }
     }
     summary
 }
@@ -764,6 +796,66 @@ fn redact_json(value: &mut Value) -> usize {
         }
         _ => 0usize,
     }
+}
+
+fn normalize_body_text_for_matching(headers: &[(String, String)], body_text: &str) -> String {
+    if let Some(redacted) = redact_json_body_text(body_text) {
+        return redacted;
+    }
+
+    if is_form_body_content_type(headers) || looks_like_form_body_text(body_text) {
+        return redact_form_body_text(body_text);
+    }
+
+    body_text.to_string()
+}
+
+fn redact_json_body_text(body_text: &str) -> Option<String> {
+    let mut value: Value = serde_json::from_str(body_text.trim()).ok()?;
+    redact_json(&mut value);
+    serde_json::to_string(&value).ok()
+}
+
+fn is_form_body_content_type(headers: &[(String, String)]) -> bool {
+    headers.iter().any(|(name, value)| {
+        name.eq_ignore_ascii_case("content-type")
+            && value
+                .split_once(';')
+                .map_or(value.as_str(), |(media_type, _)| media_type)
+                .trim()
+                .eq_ignore_ascii_case("application/x-www-form-urlencoded")
+    })
+}
+
+fn looks_like_form_body_text(body_text: &str) -> bool {
+    if body_text.is_empty() || body_text.contains('\n') {
+        return false;
+    }
+
+    let mut pair_count = 0usize;
+    for segment in body_text.split('&') {
+        let Some((key, _)) = segment.split_once('=') else {
+            return false;
+        };
+        if key.is_empty() {
+            return false;
+        }
+        pair_count += 1;
+    }
+
+    pair_count > 1
+}
+
+fn redact_form_body_text(body_text: &str) -> String {
+    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+    for (key, value) in url::form_urlencoded::parse(body_text.as_bytes()) {
+        if is_sensitive_key(&key) {
+            serializer.append_pair(&key, REDACTED);
+        } else {
+            serializer.append_pair(&key, &value);
+        }
+    }
+    serializer.finish()
 }
 
 fn is_sensitive_key(key: &str) -> bool {
@@ -1395,6 +1487,40 @@ mod tests {
         assert_eq!(redact_json(&mut val), 0);
     }
 
+    #[test]
+    fn normalize_body_text_redacts_json_payloads() {
+        let body = r#"{"api_key":"sk-secret","model":"gpt-4"}"#;
+        let normalized = normalize_body_text_for_matching(&[], body);
+        let parsed: Value = serde_json::from_str(&normalized).expect("normalized json");
+        assert_eq!(parsed["api_key"], REDACTED);
+        assert_eq!(parsed["model"], "gpt-4");
+    }
+
+    #[test]
+    fn normalize_body_text_redacts_form_payloads() {
+        let headers = vec![(
+            "content-type".to_string(),
+            "application/x-www-form-urlencoded".to_string(),
+        )];
+        let normalized = normalize_body_text_for_matching(
+            &headers,
+            "grant_type=refresh_token&client_secret=s3cr3t&scope=repo",
+        );
+        let params: std::collections::HashMap<String, String> =
+            url::form_urlencoded::parse(normalized.as_bytes())
+                .map(|(key, value)| (key.into_owned(), value.into_owned()))
+                .collect();
+        assert_eq!(
+            params.get("grant_type").map(String::as_str),
+            Some("refresh_token")
+        );
+        assert_eq!(
+            params.get("client_secret").map(String::as_str),
+            Some(REDACTED)
+        );
+        assert_eq!(params.get("scope").map(String::as_str), Some("repo"));
+    }
+
     // ─── redact_headers ──────────────────────────────────────────────
 
     #[test]
@@ -1648,6 +1774,52 @@ mod tests {
 
         incoming.body_text = Some("different".to_string());
         assert!(!request_matches(&recorded, &incoming));
+    }
+
+    #[test]
+    fn request_matches_redacts_form_body_text() {
+        let headers = vec![(
+            "content-type".to_string(),
+            "application/x-www-form-urlencoded".to_string(),
+        )];
+        let recorded = RecordedRequest {
+            method: "POST".to_string(),
+            url: "https://x.com".to_string(),
+            headers: headers.clone(),
+            body: None,
+            body_text: Some(
+                "grant_type=refresh_token&client_secret=%5BREDACTED%5D&scope=repo".to_string(),
+            ),
+        };
+        let incoming = RecordedRequest {
+            method: "POST".to_string(),
+            url: "https://x.com".to_string(),
+            headers,
+            body: None,
+            body_text: Some(
+                "grant_type=refresh_token&client_secret=real-secret&scope=repo".to_string(),
+            ),
+        };
+        assert!(request_matches(&recorded, &incoming));
+    }
+
+    #[test]
+    fn request_matches_redacts_json_body_text() {
+        let recorded = RecordedRequest {
+            method: "POST".to_string(),
+            url: "https://x.com".to_string(),
+            headers: vec![],
+            body: None,
+            body_text: Some(r#"{"api_key":"[REDACTED]","model":"gpt-4"}"#.to_string()),
+        };
+        let incoming = RecordedRequest {
+            method: "POST".to_string(),
+            url: "https://x.com".to_string(),
+            headers: vec![],
+            body: None,
+            body_text: Some(r#"{"api_key":"sk-secret","model":"gpt-4"}"#.to_string()),
+        };
+        assert!(request_matches(&recorded, &incoming));
     }
 
     #[test]
@@ -2082,6 +2254,54 @@ mod tests {
         let summary = redact_cassette(&mut cassette);
         assert_eq!(summary.headers_redacted, 2);
         assert_eq!(summary.json_fields_redacted, 2);
+    }
+
+    #[test]
+    fn redact_cassette_redacts_request_body_text() {
+        let mut cassette = Cassette {
+            version: "1.0".to_string(),
+            test_name: "body_text".to_string(),
+            recorded_at: "now".to_string(),
+            interactions: vec![Interaction {
+                request: RecordedRequest {
+                    method: "POST".to_string(),
+                    url: "https://example.com/token".to_string(),
+                    headers: vec![(
+                        "content-type".to_string(),
+                        "application/x-www-form-urlencoded".to_string(),
+                    )],
+                    body: None,
+                    body_text: Some(
+                        "grant_type=refresh_token&client_secret=s3cr3t&scope=repo".to_string(),
+                    ),
+                },
+                response: RecordedResponse {
+                    status: 200,
+                    headers: vec![],
+                    body_chunks: vec![],
+                    body_chunks_base64: None,
+                },
+            }],
+        };
+
+        let summary = redact_cassette(&mut cassette);
+        assert_eq!(summary.headers_redacted, 0);
+        assert_eq!(summary.json_fields_redacted, 0);
+
+        let redacted = cassette.interactions[0]
+            .request
+            .body_text
+            .as_deref()
+            .expect("redacted body_text");
+        let params: std::collections::HashMap<String, String> =
+            url::form_urlencoded::parse(redacted.as_bytes())
+                .map(|(key, value)| (key.into_owned(), value.into_owned()))
+                .collect();
+        assert_eq!(
+            params.get("client_secret").map(String::as_str),
+            Some(REDACTED)
+        );
+        assert_eq!(params.get("scope").map(String::as_str), Some("repo"));
     }
 
     // ─── VcrRecorder accessors ───────────────────────────────────────
