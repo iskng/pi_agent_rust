@@ -1167,6 +1167,9 @@ impl AgentSessionHandle {
     ) -> Result<AssistantMessage> {
         let combined = self.make_combined_callback(on_event);
         self.session
+            .sync_runtime_selection_from_session_header()
+            .await?;
+        self.session
             .agent
             .run_continue_with_abort(None, combined)
             .await
@@ -1179,6 +1182,9 @@ impl AgentSessionHandle {
         on_event: impl Fn(AgentEvent) + Send + Sync + 'static,
     ) -> Result<AssistantMessage> {
         let combined = self.make_combined_callback(on_event);
+        self.session
+            .sync_runtime_selection_from_session_header()
+            .await?;
         self.session
             .agent
             .run_continue_with_abort(Some(abort_signal), combined)
@@ -1274,20 +1280,40 @@ impl AgentSessionHandle {
 
     /// Update thinking level and persist it to session metadata.
     pub async fn set_thinking_level(&mut self, level: crate::model::ThinkingLevel) -> Result<()> {
-        let level_string = level.to_string();
         let cx = crate::agent_cx::AgentCx::for_request();
-        {
+        let (effective_level, changed) = {
             let mut guard = self
                 .session
                 .session
                 .lock(cx.cx())
                 .await
                 .map_err(|e| Error::session(e.to_string()))?;
+            let (provider_id, model_id) = match (
+                guard.header.provider.as_deref(),
+                guard.header.model_id.as_deref(),
+            ) {
+                (Some(provider_id), Some(model_id)) => {
+                    (provider_id.to_string(), model_id.to_string())
+                }
+                _ => self.model(),
+            };
+            let effective_level =
+                self.session
+                    .clamp_thinking_level_for_model(&provider_id, &model_id, level);
+            let level_string = effective_level.to_string();
+            let changed = guard.header.thinking_level.as_deref() != Some(level_string.as_str());
             guard.set_model_header(None, None, Some(level_string.clone()));
-            guard.append_thinking_level_change(level_string);
+            if changed {
+                guard.append_thinking_level_change(level_string);
+            }
+            (effective_level, changed)
+        };
+        self.session.agent.stream_options_mut().thinking_level = Some(effective_level);
+        if changed {
+            self.session.persist_session().await
+        } else {
+            Ok(())
         }
-        self.session.agent.stream_options_mut().thinking_level = Some(level);
-        self.session.persist_session().await
     }
 
     /// Return all model messages for the current session path.
@@ -1670,7 +1696,7 @@ pub async fn create_agent_session(options: SessionOptions) -> Result<AgentSessio
             .await?;
     }
 
-    agent_session.set_model_registry(model_registry);
+    agent_session.set_model_registry(model_registry.clone());
     agent_session.set_auth_storage(auth);
 
     let history = {
@@ -1704,6 +1730,7 @@ mod tests {
     use super::*;
     use asupersync::runtime::RuntimeBuilder;
     use asupersync::runtime::reactor::create_reactor;
+    use asupersync::sync::Mutex as AsyncMutex;
     use std::sync::{Arc, Mutex};
     use tempfile::tempdir;
 
@@ -1795,6 +1822,120 @@ mod tests {
         let provider = handle.session().agent.provider();
         assert_eq!(provider.name(), "openai");
         assert_eq!(provider.model_id(), "gpt-4o");
+    }
+
+    #[test]
+    fn create_agent_session_set_thinking_level_clamps_and_dedupes_history() {
+        let tmp = tempdir().expect("tempdir");
+        let options = SessionOptions {
+            provider: Some("openai".to_string()),
+            model: Some("gpt-4o".to_string()),
+            working_directory: Some(tmp.path().to_path_buf()),
+            no_session: true,
+            ..SessionOptions::default()
+        };
+
+        let mut handle = run_async(create_agent_session(options)).expect("create session");
+        run_async(handle.set_thinking_level(crate::model::ThinkingLevel::High))
+            .expect("set thinking");
+        run_async(handle.set_thinking_level(crate::model::ThinkingLevel::High))
+            .expect("reapply thinking");
+
+        assert_eq!(
+            handle.session().agent.stream_options().thinking_level,
+            Some(crate::model::ThinkingLevel::Off)
+        );
+
+        let thinking_changes = run_async(async {
+            let cx = crate::agent_cx::AgentCx::for_request();
+            let guard = handle
+                .session()
+                .session
+                .lock(cx.cx())
+                .await
+                .expect("lock session");
+            assert_eq!(guard.header.thinking_level.as_deref(), Some("off"));
+            guard
+                .entries_for_current_path()
+                .iter()
+                .filter(|entry| {
+                    matches!(entry, crate::session::SessionEntry::ThinkingLevelChange(_))
+                })
+                .count()
+        });
+        assert_eq!(thinking_changes, 1);
+    }
+
+    #[test]
+    fn from_session_with_listeners_set_thinking_level_uses_session_header_target() {
+        let dir = tempdir().expect("tempdir");
+        let auth_path = dir.path().join("auth.json");
+        let auth = crate::auth::AuthStorage::load(auth_path).expect("load auth");
+        let mut registry = ModelRegistry::load(&auth, None);
+        registry.merge_entries(vec![ModelEntry {
+            model: Model {
+                id: "plain-model".to_string(),
+                name: "Plain Model".to_string(),
+                api: "openai-completions".to_string(),
+                provider: "acme".to_string(),
+                base_url: "https://example.invalid/v1".to_string(),
+                reasoning: false,
+                input: vec![InputType::Text],
+                cost: ModelCost {
+                    input: 0.0,
+                    output: 0.0,
+                    cache_read: 0.0,
+                    cache_write: 0.0,
+                },
+                context_window: 128_000,
+                max_tokens: 8_192,
+                headers: HashMap::new(),
+            },
+            api_key: None,
+            headers: HashMap::new(),
+            auth_header: false,
+            compat: None,
+            oauth_config: None,
+        }]);
+        let entry = registry
+            .find("anthropic", "claude-sonnet-4-5")
+            .expect("anthropic model in registry");
+        let provider = providers::create_provider(&entry, None).expect("create anthropic provider");
+        let tools = crate::tools::ToolRegistry::new(&[], std::path::Path::new("."), None);
+        let agent = Agent::new(
+            provider,
+            tools,
+            AgentConfig {
+                system_prompt: None,
+                max_tool_iterations: 50,
+                stream_options: StreamOptions::default(),
+                block_images: false,
+            },
+        );
+
+        let mut session = Session::in_memory();
+        session.header.provider = Some("acme".to_string());
+        session.header.model_id = Some("plain-model".to_string());
+
+        let mut agent_session = AgentSession::new(
+            agent,
+            Arc::new(AsyncMutex::new(session)),
+            false,
+            ResolvedCompactionSettings::default(),
+        );
+        agent_session.set_model_registry(registry);
+
+        let mut handle =
+            AgentSessionHandle::from_session_with_listeners(agent_session, EventListeners::new());
+        run_async(handle.set_thinking_level(crate::model::ThinkingLevel::High))
+            .expect("set thinking");
+
+        assert_eq!(
+            handle.session().agent.stream_options().thinking_level,
+            Some(crate::model::ThinkingLevel::Off)
+        );
+        assert_eq!(handle.model().0, "anthropic");
+        assert_eq!(handle.model().1, "claude-sonnet-4-5");
     }
 
     #[test]

@@ -166,7 +166,9 @@ impl PiApp {
             }
         };
 
-        if let Err(message) = self.switch_active_model(&next, provider_impl, resolved_key_opt) {
+        if let Err(message) =
+            self.switch_active_model(&next, provider_impl, resolved_key_opt.as_deref())
+        {
             self.status_message = Some(message);
             return;
         }
@@ -513,7 +515,7 @@ mod tests {
 
         app.apply_model_selection(&crate::model_selector::ModelKey {
             provider: next.model.provider.clone(),
-            id: next.model.id.clone(),
+            id: next.model.id,
         });
 
         let mut agent_guard = app.agent.try_lock().expect("agent lock");

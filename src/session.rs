@@ -215,7 +215,11 @@ impl ExtensionSession for SessionHandle {
             .lock(cx.cx())
             .await
             .map_err(|e| Error::session(format!("Failed to lock session: {e}")))?;
-        session.append_model_change(provider.clone(), model_id.clone());
+        let changed = session.header.provider.as_deref() != Some(provider.as_str())
+            || session.header.model_id.as_deref() != Some(model_id.as_str());
+        if changed {
+            session.append_model_change(provider.clone(), model_id.clone());
+        }
         session.set_model_header(Some(provider), Some(model_id), None);
         Ok(())
     }
@@ -238,7 +242,10 @@ impl ExtensionSession for SessionHandle {
             .lock(cx.cx())
             .await
             .map_err(|e| Error::session(format!("Failed to lock session: {e}")))?;
-        session.append_thinking_level_change(level.clone());
+        let changed = session.header.thinking_level.as_deref() != Some(level.as_str());
+        if changed {
+            session.append_thinking_level_change(level.clone());
+        }
         session.set_model_header(None, None, Some(level));
         Ok(())
     }
@@ -1159,6 +1166,9 @@ impl Session {
         header: SessionHeader,
         mode: V2OpenMode,
     ) -> Result<(Self, SessionOpenDiagnostics)> {
+        header
+            .validate()
+            .map_err(|reason| crate::Error::session(format!("Invalid session header: {reason}")))?;
         let frames = match mode {
             V2OpenMode::Full => store.read_all_entries()?,
             V2OpenMode::ActivePath => match store.head() {
@@ -1549,6 +1559,9 @@ impl Session {
     #[allow(clippy::too_many_lines)]
     async fn save_inner(&mut self) -> Result<()> {
         self.ensure_entry_ids();
+        self.header
+            .validate()
+            .map_err(|reason| Error::session(format!("Invalid session header: {reason}")))?;
 
         let store_kind = match self
             .path
@@ -2810,6 +2823,9 @@ fn load_session_meta_jsonl(path: &Path) -> Result<SessionPickEntry> {
 
     let header: SessionHeader =
         serde_json::from_str(&header_line).map_err(|e| Error::session(format!("{e}")))?;
+    header
+        .validate()
+        .map_err(|reason| Error::session(format!("Invalid session header: {reason}")))?;
 
     let mut message_count = 0u64;
     let mut name = None;
@@ -2847,6 +2863,9 @@ fn load_session_meta_sqlite(path: &Path) -> Result<SessionPickEntry> {
         crate::session_sqlite::load_session_meta(path).await
     })?;
     let header = meta.header;
+    header
+        .validate()
+        .map_err(|reason| Error::session(format!("Invalid session header: {reason}")))?;
 
     let (last_modified_ms, size_bytes) = session_file_stats(path)?;
 
@@ -2905,6 +2924,33 @@ impl SessionHeader {
             thinking_level: None,
             parent_session: None,
         }
+    }
+
+    pub fn validate(&self) -> std::result::Result<(), String> {
+        if self.r#type != "session" {
+            return Err(format!("type must be `session`, got `{}`", self.r#type));
+        }
+        if self.version != Some(SESSION_VERSION) {
+            return Err(format!(
+                "version must be {SESSION_VERSION}, got {}",
+                self.version
+                    .map_or_else(|| "none".to_string(), |value| value.to_string())
+            ));
+        }
+        if self.id.trim().is_empty() {
+            return Err("id must be non-empty".to_string());
+        }
+        if self.timestamp.trim().is_empty() {
+            return Err("timestamp must be non-empty".to_string());
+        }
+        if self.cwd.trim().is_empty() {
+            return Err("cwd must be non-empty".to_string());
+        }
+        Ok(())
+    }
+
+    pub fn is_valid(&self) -> bool {
+        self.validate().is_ok()
     }
 }
 
@@ -3625,6 +3671,9 @@ fn open_jsonl_blocking(path_buf: PathBuf) -> Result<(Session, SessionOpenDiagnos
     // Parse header (first line)
     let header: SessionHeader = serde_json::from_str(&header_line)
         .map_err(|e| crate::Error::session(format!("Invalid header: {e}")))?;
+    header
+        .validate()
+        .map_err(|reason| crate::Error::session(format!("Invalid session header: {reason}")))?;
 
     let mut entries = Vec::new();
     let mut diagnostics = SessionOpenDiagnostics::default();
@@ -3797,6 +3846,9 @@ fn open_from_v2_store_blocking(jsonl_path: PathBuf) -> Result<(Session, SessionO
         .map_err(|e| crate::Error::Io(Box::new(e)))?;
     let header: SessionHeader = serde_json::from_str(header_line.trim())
         .map_err(|e| crate::Error::session(format!("Invalid header in JSONL: {e}")))?;
+    header.validate().map_err(|reason| {
+        crate::Error::session(format!("Invalid session header in JSONL: {reason}"))
+    })?;
 
     // 2. Open V2 sidecar store.
     let v2_root = session_store_v2::v2_sidecar_path(&jsonl_path);
@@ -3917,6 +3969,12 @@ fn build_v2_sidecar_from_jsonl_into(jsonl_path: &Path, v2_root: &Path) -> Result
         if header_line.trim().is_empty() {
             return Err(crate::Error::session("Empty JSONL session file"));
         }
+
+        let header: SessionHeader = serde_json::from_str(header_line.trim())
+            .map_err(|e| crate::Error::session(format!("Invalid header in JSONL: {e}")))?;
+        header.validate().map_err(|reason| {
+            crate::Error::session(format!("Invalid session header in JSONL: {reason}"))
+        })?;
 
         if v2_root.exists() {
             std::fs::remove_dir_all(v2_root).map_err(|e| crate::Error::Io(Box::new(e)))?;
@@ -4080,6 +4138,12 @@ pub fn verify_v2_against_jsonl(
     if header_line.trim().is_empty() {
         return Err(crate::Error::session("Empty JSONL session file"));
     }
+
+    let header: SessionHeader = serde_json::from_str(header_line.trim())
+        .map_err(|e| crate::Error::session(format!("Invalid header in JSONL: {e}")))?;
+    header.validate().map_err(|reason| {
+        crate::Error::session(format!("Invalid session header in JSONL: {reason}"))
+    })?;
 
     let mut jsonl_ids: Vec<String> = Vec::new();
     for line_res in reader.lines() {
@@ -4264,9 +4328,14 @@ pub fn migrate_dry_run(jsonl_path: &Path) -> Result<session_store_v2::MigrationV
     let contents =
         std::fs::read_to_string(jsonl_path).map_err(|e| crate::Error::Io(Box::new(e)))?;
     let mut lines = contents.lines();
-    let _header = lines
+    let header_line = lines
         .next()
         .ok_or_else(|| crate::Error::session("Empty JSONL session file"))?;
+    let header: SessionHeader = serde_json::from_str(header_line)
+        .map_err(|e| crate::Error::session(format!("Invalid header in JSONL: {e}")))?;
+    header.validate().map_err(|reason| {
+        crate::Error::session(format!("Invalid session header in JSONL: {reason}"))
+    })?;
 
     let mut store = SessionStoreV2::create(&tmp_v2_root, 64 * 1024 * 1024)?;
     for line in lines {
@@ -4722,6 +4791,42 @@ mod tests {
         let (provider, model_id) = run_async(async { handle.get_model().await });
         assert_eq!(provider.as_deref(), Some("prov"));
         assert_eq!(model_id.as_deref(), Some("model"));
+    }
+
+    #[test]
+    fn test_session_handle_set_model_and_thinking_level_dedupe_history() {
+        let handle = SessionHandle(Arc::new(Mutex::new(Session::in_memory())));
+
+        run_async(async {
+            handle
+                .set_model("anthropic".to_string(), "claude-sonnet-4-5".to_string())
+                .await
+        })
+        .expect("set model");
+        run_async(async {
+            handle
+                .set_model("anthropic".to_string(), "claude-sonnet-4-5".to_string())
+                .await
+        })
+        .expect("repeat model");
+        run_async(async { handle.set_thinking_level("high".to_string()).await })
+            .expect("set thinking");
+        run_async(async { handle.set_thinking_level("high".to_string()).await })
+            .expect("repeat thinking");
+
+        let branch = run_async(async { handle.get_branch().await });
+        let model_changes = branch
+            .iter()
+            .filter(|entry| entry.get("type").and_then(Value::as_str) == Some("model_change"))
+            .count();
+        let thinking_changes = branch
+            .iter()
+            .filter(|entry| {
+                entry.get("type").and_then(Value::as_str) == Some("thinking_level_change")
+            })
+            .count();
+        assert_eq!(model_changes, 1);
+        assert_eq!(thinking_changes, 1);
     }
 
     #[test]
@@ -6366,6 +6471,40 @@ mod tests {
 
         let result = run_async(async { Session::open(path.to_string_lossy().as_ref()).await });
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_open_rejects_semantically_invalid_header() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("invalid_header.jsonl");
+        std::fs::write(
+            &path,
+            r#"{"type":"note","version":3,"id":"bad","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}"#,
+        )
+        .unwrap();
+
+        let err = run_async(async { Session::open(path.to_string_lossy().as_ref()).await })
+            .expect_err("invalid header should fail");
+        let message = err.to_string();
+        assert!(
+            message.contains("Invalid session header"),
+            "expected invalid session header error, got {message}"
+        );
+    }
+
+    #[test]
+    fn test_save_rejects_semantically_invalid_header() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut session = Session::create_with_dir(Some(temp.path().to_path_buf()));
+        session.header.r#type = "note".to_string();
+
+        let err =
+            run_async(async { session.save().await }).expect_err("invalid header should fail");
+        let message = err.to_string();
+        assert!(
+            message.contains("Invalid session header"),
+            "expected invalid session header error, got {message}"
+        );
     }
 
     // ======================================================================

@@ -1177,6 +1177,11 @@ impl PiApp {
 
     #[allow(clippy::too_many_lines)]
     fn submit_continue(&mut self) -> Option<Cmd> {
+        if let Err(message) = self.sync_runtime_selection_from_session_header() {
+            self.status_message = Some(message);
+            return None;
+        }
+
         let event_tx = self.event_tx.clone();
         let agent = Arc::clone(&self.agent);
         let session = Arc::clone(&self.session);
@@ -1287,6 +1292,11 @@ impl PiApp {
         display: &str,
     ) -> Option<Cmd> {
         if content.is_empty() {
+            return None;
+        }
+
+        if let Err(message) = self.sync_runtime_selection_from_session_header() {
+            self.status_message = Some(message);
             return None;
         }
 
@@ -1471,6 +1481,11 @@ impl PiApp {
                     return self.dispatch_extension_command(&command, &args);
                 }
             }
+        }
+
+        if let Err(message) = self.sync_runtime_selection_from_session_header() {
+            self.status_message = Some(message);
+            return None;
         }
 
         let message_owned = message.to_string();

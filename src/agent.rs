@@ -4923,36 +4923,41 @@ impl AgentSession {
     }
 
     pub async fn set_provider_model(&mut self, provider_id: &str, model_id: &str) -> Result<()> {
+        let already_active = {
+            let provider = self.agent.provider();
+            provider.name() == provider_id && provider.model_id() == model_id
+        };
+        let current_thinking = self
+            .agent
+            .stream_options()
+            .thinking_level
+            .unwrap_or_default();
+
         let target_entry = self
             .model_registry
             .as_ref()
-            .and_then(|registry| registry.find(provider_id, model_id))
-            .ok_or_else(|| {
-                Error::validation(format!(
-                    "Unable to switch provider/model to {provider_id}/{model_id}"
-                ))
-            })?;
-
-        let resolved_key = self.resolve_stream_api_key_for_model(&target_entry);
-        if model_requires_configured_credential(&target_entry) && resolved_key.is_none() {
-            return Err(Error::auth(format!(
-                "Missing credentials for {provider_id}/{model_id}"
-            )));
-        }
-
-        let next_thinking = target_entry.clamp_thinking_level(
-            self.agent
-                .stream_options()
-                .thinking_level
-                .unwrap_or_default(),
-        );
-
-        self.apply_session_model_selection(provider_id, model_id);
-        let provider = self.agent.provider();
-        if provider.name() != provider_id || provider.model_id() != model_id {
+            .and_then(|registry| registry.find(provider_id, model_id));
+        let next_thinking = if let Some(target_entry) = target_entry {
+            let resolved_key = self.resolve_stream_api_key_for_model(&target_entry);
+            if !already_active
+                && model_requires_configured_credential(&target_entry)
+                && resolved_key.is_none()
+            {
+                return Err(Error::auth(format!(
+                    "Missing credentials for {provider_id}/{model_id}"
+                )));
+            }
+            self.clamp_thinking_level_for_model(provider_id, model_id, current_thinking)
+        } else if already_active {
+            current_thinking
+        } else {
             return Err(Error::validation(format!(
                 "Unable to switch provider/model to {provider_id}/{model_id}"
             )));
+        };
+
+        if !already_active {
+            self.apply_session_model_selection(provider_id, model_id)?;
         }
         self.agent.stream_options_mut().thinking_level = Some(next_thinking);
 
@@ -4963,11 +4968,18 @@ impl AgentSession {
                 .lock(cx.cx())
                 .await
                 .map_err(|e| Error::session(e.to_string()))?;
+            let previous_model = (
+                session.header.provider.as_deref(),
+                session.header.model_id.as_deref(),
+            );
             let previous_thinking = session
                 .header
                 .thinking_level
                 .as_deref()
                 .and_then(|value| value.parse::<crate::model::ThinkingLevel>().ok());
+            if previous_model != (Some(provider_id), Some(model_id)) {
+                session.append_model_change(provider_id.to_string(), model_id.to_string());
+            }
             session.set_model_header(
                 Some(provider_id.to_string()),
                 Some(model_id.to_string()),
@@ -4979,6 +4991,18 @@ impl AgentSession {
         }
 
         self.persist_session().await
+    }
+
+    pub(crate) fn clamp_thinking_level_for_model(
+        &self,
+        provider_id: &str,
+        model_id: &str,
+        level: crate::model::ThinkingLevel,
+    ) -> crate::model::ThinkingLevel {
+        self.model_registry
+            .as_ref()
+            .and_then(|registry| registry.find(provider_id, model_id))
+            .map_or(level, |entry| entry.clamp_thinking_level(level))
     }
 
     fn resolve_stream_api_key_for_model(&self, entry: &ModelEntry) -> Option<String> {
@@ -4995,21 +5019,97 @@ impl AgentSession {
             .or_else(|| normalize(entry.api_key.clone()))
     }
 
-    fn apply_session_model_selection(&mut self, provider_id: &str, model_id: &str) {
+    pub(crate) async fn sync_runtime_selection_from_session_header(&mut self) -> Result<()> {
+        let session_state = {
+            let cx = crate::agent_cx::AgentCx::for_request();
+            let session = self
+                .session
+                .lock(cx.cx())
+                .await
+                .map_err(|e| Error::session(e.to_string()))?;
+            (
+                session.header.provider.clone(),
+                session.header.model_id.clone(),
+                session.header.thinking_level.clone(),
+            )
+        };
+
+        let (session_provider, session_model, session_thinking) = session_state;
+
+        if let (Some(provider_id), Some(model_id)) =
+            (session_provider.as_deref(), session_model.as_deref())
+        {
+            self.apply_session_model_selection(provider_id, model_id)?;
+        }
+
+        let Some(session_thinking) = session_thinking.as_deref() else {
+            return Ok(());
+        };
+
+        let Ok(requested) = session_thinking.parse::<crate::model::ThinkingLevel>() else {
+            tracing::warn!("Ignoring invalid session thinking level: {session_thinking}");
+            return Ok(());
+        };
+
+        let effective = if let (Some(provider_id), Some(model_id)) =
+            (session_provider.as_deref(), session_model.as_deref())
+        {
+            self.clamp_thinking_level_for_model(provider_id, model_id, requested)
+        } else {
+            requested
+        };
+
+        self.agent.stream_options_mut().thinking_level = Some(effective);
+        if effective == requested {
+            return Ok(());
+        }
+
+        {
+            let cx = crate::agent_cx::AgentCx::for_request();
+            let mut session = self
+                .session
+                .lock(cx.cx())
+                .await
+                .map_err(|e| Error::session(e.to_string()))?;
+            let previous_thinking = session
+                .header
+                .thinking_level
+                .as_deref()
+                .and_then(|value| value.parse::<crate::model::ThinkingLevel>().ok());
+            session.set_model_header(None, None, Some(effective.to_string()));
+            if previous_thinking != Some(effective) {
+                session.append_thinking_level_change(effective.to_string());
+            }
+        }
+
+        self.persist_session().await
+    }
+
+    fn apply_session_model_selection(&mut self, provider_id: &str, model_id: &str) -> Result<()> {
         if self.agent.provider().name() == provider_id
             && self.agent.provider().model_id() == model_id
         {
-            return;
+            return Ok(());
         }
 
         let Some(registry) = &self.model_registry else {
-            return;
+            return Err(Error::validation(format!(
+                "Unable to switch provider/model to {provider_id}/{model_id}"
+            )));
         };
 
         let Some(entry) = registry.find(provider_id, model_id) else {
-            tracing::warn!("Session model {provider_id}/{model_id} not found in model registry");
-            return;
+            return Err(Error::validation(format!(
+                "Unable to switch provider/model to {provider_id}/{model_id}"
+            )));
         };
+
+        let resolved_key = self.resolve_stream_api_key_for_model(&entry);
+        if model_requires_configured_credential(&entry) && resolved_key.is_none() {
+            return Err(Error::auth(format!(
+                "Missing credentials for {provider_id}/{model_id}"
+            )));
+        }
 
         match crate::providers::create_provider(
             &entry,
@@ -5019,20 +5119,14 @@ impl AgentSession {
                 tracing::info!("Updating agent provider to {provider_id}/{model_id}");
                 self.agent.set_provider(provider);
 
-                let resolved_key = self.resolve_stream_api_key_for_model(&entry);
-                if resolved_key.is_none() {
-                    tracing::warn!(
-                        "No API key resolved for session model {provider_id}/{model_id}; clearing stream API key"
-                    );
-                }
-
                 let stream_options = self.agent.stream_options_mut();
                 stream_options.api_key = resolved_key; // ubs:ignore - not a hardcoded secret
                 stream_options.headers.clone_from(&entry.headers);
+                Ok(())
             }
-            Err(e) => {
-                tracing::warn!("Failed to create provider for session model: {e}");
-            }
+            Err(e) => Err(Error::validation(format!(
+                "Unable to switch provider/model to {provider_id}/{model_id}: {e}"
+            ))),
         }
     }
 
@@ -5801,22 +5895,7 @@ impl AgentSession {
         on_event: impl Fn(AgentEvent) + Send + Sync + 'static,
     ) -> Result<AssistantMessage> {
         let on_event: AgentEventHandler = Arc::new(on_event);
-        let session_model = {
-            let cx = crate::agent_cx::AgentCx::for_request();
-            let session = self
-                .session
-                .lock(cx.cx())
-                .await
-                .map_err(|e| Error::session(e.to_string()))?;
-            (
-                session.header.provider.clone(),
-                session.header.model_id.clone(),
-            )
-        };
-
-        if let (Some(provider_id), Some(model_id)) = session_model {
-            self.apply_session_model_selection(provider_id.as_str(), model_id.as_str());
-        }
+        self.sync_runtime_selection_from_session_header().await?;
 
         self.maybe_compact(Arc::clone(&on_event)).await?;
         let history = {
@@ -5869,22 +5948,7 @@ impl AgentSession {
         on_event: impl Fn(AgentEvent) + Send + Sync + 'static,
     ) -> Result<AssistantMessage> {
         let on_event: AgentEventHandler = Arc::new(on_event);
-        let session_model = {
-            let cx = crate::agent_cx::AgentCx::for_request();
-            let session = self
-                .session
-                .lock(cx.cx())
-                .await
-                .map_err(|e| Error::session(e.to_string()))?;
-            (
-                session.header.provider.clone(),
-                session.header.model_id.clone(),
-            )
-        };
-
-        if let (Some(provider_id), Some(model_id)) = session_model {
-            self.apply_session_model_selection(provider_id.as_str(), model_id.as_str());
-        }
+        self.sync_runtime_selection_from_session_header().await?;
 
         self.maybe_compact(Arc::clone(&on_event)).await?;
         let history = {
@@ -5945,22 +6009,7 @@ impl AgentSession {
         on_event: impl Fn(AgentEvent) + Send + Sync + 'static,
     ) -> Result<AssistantMessage> {
         let on_event: AgentEventHandler = Arc::new(on_event);
-        let session_model = {
-            let cx = crate::agent_cx::AgentCx::for_request();
-            let session = self
-                .session
-                .lock(cx.cx())
-                .await
-                .map_err(|e| Error::session(e.to_string()))?;
-            (
-                session.header.provider.clone(),
-                session.header.model_id.clone(),
-            )
-        };
-
-        if let (Some(provider_id), Some(model_id)) = session_model {
-            self.apply_session_model_selection(provider_id.as_str(), model_id.as_str());
-        }
+        self.sync_runtime_selection_from_session_header().await?;
 
         self.maybe_compact(Arc::clone(&on_event)).await?;
         let history = {
@@ -6696,7 +6745,9 @@ mod tests {
         );
 
         let mut agent_session = build_switch_test_session(&auth);
-        agent_session.apply_session_model_selection("openai", "gpt-4o");
+        agent_session
+            .apply_session_model_selection("openai", "gpt-4o")
+            .expect("switch should update stream options");
 
         assert_eq!(agent_session.agent.provider().name(), "openai");
         assert_eq!(agent_session.agent.provider().model_id(), "gpt-4o");
@@ -6711,7 +6762,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_session_model_selection_clears_stale_key_when_target_has_no_key() {
+    fn apply_session_model_selection_clears_stale_key_for_keyless_target() {
         let dir = tempfile::tempdir().expect("tempdir");
         let auth_path = dir.path().join("auth.json");
         let mut auth = AuthStorage::load(auth_path).expect("load auth");
@@ -6722,10 +6773,40 @@ mod tests {
             },
         );
 
-        let mut agent_session = build_switch_test_session(&auth);
-        agent_session.apply_session_model_selection("openai", "gpt-4o");
+        let mut registry = ModelRegistry::load(&auth, None);
+        registry.merge_entries(vec![ModelEntry {
+            model: Model {
+                id: "local-model".to_string(),
+                name: "Local Model".to_string(),
+                api: "openai-completions".to_string(),
+                provider: "acme-local".to_string(),
+                base_url: "https://example.invalid/v1".to_string(),
+                reasoning: true,
+                input: vec![InputType::Text],
+                cost: ModelCost {
+                    input: 0.0,
+                    output: 0.0,
+                    cache_read: 0.0,
+                    cache_write: 0.0,
+                },
+                context_window: 128_000,
+                max_tokens: 8_192,
+                headers: HashMap::new(),
+            },
+            api_key: None,
+            headers: HashMap::new(),
+            auth_header: false,
+            compat: None,
+            oauth_config: None,
+        }]);
 
-        assert_eq!(agent_session.agent.provider().name(), "openai");
+        let mut agent_session = build_switch_test_session(&auth);
+        agent_session.set_model_registry(registry);
+        agent_session
+            .apply_session_model_selection("acme-local", "local-model")
+            .expect("keyless local model should still activate");
+
+        assert_eq!(agent_session.agent.provider().name(), "acme-local");
         assert_eq!(
             agent_session.agent.stream_options().api_key,
             None,
@@ -6734,7 +6815,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_session_model_selection_treats_blank_model_key_as_missing() {
+    fn apply_session_model_selection_treats_blank_model_key_as_missing_credential() {
         let dir = tempfile::tempdir().expect("tempdir");
         let auth_path = dir.path().join("auth.json");
         let auth = AuthStorage::load(auth_path).expect("load auth");
@@ -6768,13 +6849,20 @@ mod tests {
 
         let mut agent_session = build_switch_test_session(&auth);
         agent_session.set_model_registry(registry);
-        agent_session.apply_session_model_selection("acme", "blank-model");
+        let err = agent_session
+            .apply_session_model_selection("acme", "blank-model")
+            .expect_err("blank keys must not satisfy credential requirements");
 
-        assert_eq!(agent_session.agent.provider().name(), "acme");
+        assert!(
+            err.to_string()
+                .contains("Missing credentials for acme/blank-model"),
+            "unexpected error: {err}"
+        );
+        assert_eq!(agent_session.agent.provider().name(), "anthropic");
         assert_eq!(
             agent_session.agent.stream_options().api_key,
-            None,
-            "blank model keys must not be treated as valid credentials"
+            Some("stale-key".to_string()),
+            "failed switches must preserve the prior runtime credentials"
         );
     }
 
@@ -6956,6 +7044,233 @@ mod tests {
             assert_eq!(session.header.provider.as_deref(), Some("acme"));
             assert_eq!(session.header.model_id.as_deref(), Some("plain-model"));
             assert_eq!(session.header.thinking_level.as_deref(), Some("off"));
+        });
+    }
+
+    #[test]
+    fn set_provider_model_records_model_change_once() {
+        let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .expect("build runtime");
+
+        runtime.block_on(async {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let auth_path = dir.path().join("auth.json");
+            let mut auth = AuthStorage::load(auth_path).expect("load auth");
+            auth.set(
+                "anthropic",
+                AuthCredential::ApiKey {
+                    key: "anthropic-key".to_string(),
+                },
+            );
+            auth.set(
+                "openai",
+                AuthCredential::ApiKey {
+                    key: "openai-key".to_string(),
+                },
+            );
+
+            let mut agent_session = build_switch_test_session(&auth);
+            agent_session
+                .set_provider_model("openai", "gpt-4o")
+                .await
+                .expect("switch model");
+            agent_session
+                .set_provider_model("openai", "gpt-4o")
+                .await
+                .expect("repeat same model");
+
+            let cx = crate::agent_cx::AgentCx::for_request();
+            let session = agent_session
+                .session
+                .lock(cx.cx())
+                .await
+                .expect("session lock");
+            let model_changes = session
+                .entries_for_current_path()
+                .iter()
+                .filter(|entry| matches!(entry, crate::session::SessionEntry::ModelChange(_)))
+                .count();
+            assert_eq!(model_changes, 1);
+        });
+    }
+
+    #[test]
+    fn sync_runtime_selection_from_session_header_clamps_and_normalizes_thinking() {
+        let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .expect("build runtime");
+
+        runtime.block_on(async {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let auth_path = dir.path().join("auth.json");
+            let auth = AuthStorage::load(auth_path).expect("load auth");
+
+            let mut registry = ModelRegistry::load(&auth, None);
+            registry.merge_entries(vec![ModelEntry {
+                model: Model {
+                    id: "plain-model".to_string(),
+                    name: "Plain Model".to_string(),
+                    api: "openai-completions".to_string(),
+                    provider: "acme".to_string(),
+                    base_url: "https://example.invalid/v1".to_string(),
+                    reasoning: false,
+                    input: vec![InputType::Text],
+                    cost: ModelCost {
+                        input: 0.0,
+                        output: 0.0,
+                        cache_read: 0.0,
+                        cache_write: 0.0,
+                    },
+                    context_window: 128_000,
+                    max_tokens: 8_192,
+                    headers: HashMap::new(),
+                },
+                api_key: None,
+                headers: HashMap::new(),
+                auth_header: false,
+                compat: None,
+                oauth_config: None,
+            }]);
+
+            let mut agent_session = build_switch_test_session(&auth);
+            agent_session.set_model_registry(registry);
+            agent_session.agent.stream_options_mut().thinking_level =
+                Some(crate::model::ThinkingLevel::High);
+
+            {
+                let cx = crate::agent_cx::AgentCx::for_request();
+                let mut session = agent_session
+                    .session
+                    .lock(cx.cx())
+                    .await
+                    .expect("session lock");
+                session.header.provider = Some("acme".to_string());
+                session.header.model_id = Some("plain-model".to_string());
+                session.header.thinking_level = Some("high".to_string());
+            }
+
+            agent_session
+                .sync_runtime_selection_from_session_header()
+                .await
+                .expect("sync runtime selection");
+
+            assert_eq!(agent_session.agent.provider().name(), "acme");
+            assert_eq!(agent_session.agent.provider().model_id(), "plain-model");
+            assert_eq!(
+                agent_session.agent.stream_options().thinking_level,
+                Some(crate::model::ThinkingLevel::Off)
+            );
+
+            let cx = crate::agent_cx::AgentCx::for_request();
+            let session = agent_session
+                .session
+                .lock(cx.cx())
+                .await
+                .expect("session lock");
+            assert_eq!(session.header.thinking_level.as_deref(), Some("off"));
+            let thinking_changes = session
+                .entries_for_current_path()
+                .iter()
+                .filter(|entry| {
+                    matches!(entry, crate::session::SessionEntry::ThinkingLevelChange(_))
+                })
+                .count();
+            assert_eq!(thinking_changes, 1);
+        });
+    }
+
+    #[test]
+    fn sync_runtime_selection_from_session_header_rejects_missing_credentials() {
+        let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .expect("build runtime");
+
+        runtime.block_on(async {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let auth_path = dir.path().join("auth.json");
+            let auth = AuthStorage::load(auth_path).expect("load auth");
+            let mut agent_session = build_switch_test_session(&auth);
+
+            {
+                let cx = crate::agent_cx::AgentCx::for_request();
+                let mut session = agent_session
+                    .session
+                    .lock(cx.cx())
+                    .await
+                    .expect("session lock");
+                session.header.provider = Some("openai".to_string());
+                session.header.model_id = Some("gpt-4o".to_string());
+            }
+
+            let err = agent_session
+                .sync_runtime_selection_from_session_header()
+                .await
+                .expect_err("sync should reject switching to a credentialed target without a key");
+            assert!(
+                err.to_string()
+                    .contains("Missing credentials for openai/gpt-4o"),
+                "unexpected error: {err}"
+            );
+            assert_eq!(agent_session.agent.provider().name(), "anthropic");
+            assert_eq!(
+                agent_session.agent.provider().model_id(),
+                "claude-sonnet-4-5"
+            );
+
+            let cx = crate::agent_cx::AgentCx::for_request();
+            let session = agent_session
+                .session
+                .lock(cx.cx())
+                .await
+                .expect("session lock");
+            assert_eq!(session.header.provider.as_deref(), Some("openai"));
+            assert_eq!(session.header.model_id.as_deref(), Some("gpt-4o"));
+        });
+    }
+
+    #[test]
+    fn set_provider_model_allows_current_model_without_registry() {
+        let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .expect("build runtime");
+
+        runtime.block_on(async {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let auth_path = dir.path().join("auth.json");
+            let auth = AuthStorage::load(auth_path).expect("load auth");
+            let mut agent_session = build_switch_test_session(&auth);
+            agent_session.model_registry = None;
+            agent_session.agent.stream_options_mut().thinking_level =
+                Some(crate::model::ThinkingLevel::High);
+
+            agent_session
+                .set_provider_model("anthropic", "claude-sonnet-4-5")
+                .await
+                .expect("re-persisting the current model should succeed without a registry");
+
+            assert_eq!(agent_session.agent.provider().name(), "anthropic");
+            assert_eq!(
+                agent_session.agent.provider().model_id(),
+                "claude-sonnet-4-5"
+            );
+            assert_eq!(
+                agent_session.agent.stream_options().thinking_level,
+                Some(crate::model::ThinkingLevel::High)
+            );
+
+            let cx = crate::agent_cx::AgentCx::for_request();
+            let session = agent_session
+                .session
+                .lock(cx.cx())
+                .await
+                .expect("session lock");
+            assert_eq!(session.header.provider.as_deref(), Some("anthropic"));
+            assert_eq!(
+                session.header.model_id.as_deref(),
+                Some("claude-sonnet-4-5")
+            );
+            assert_eq!(session.header.thinking_level.as_deref(), Some("high"));
         });
     }
 

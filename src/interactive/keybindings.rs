@@ -452,7 +452,9 @@ impl PiApp {
             return;
         }
 
-        if let Err(message) = self.switch_active_model(&next, provider_impl, resolved_key_opt) {
+        if let Err(message) =
+            self.switch_active_model(&next, provider_impl, resolved_key_opt.as_deref())
+        {
             self.status_message = Some(message);
             return;
         }
@@ -1251,6 +1253,119 @@ mod tests {
                 .is_some_and(|msg| msg.contains("Missing credentials for provider acme-remote")),
             "blank inline keys must not bypass credential checks"
         );
+    }
+
+    #[test]
+    fn slash_thinking_clamps_and_avoids_duplicate_history_for_non_reasoning_models() {
+        let mut current = model_entry("ollama", "llama3.2", None, HashMap::new());
+        current.auth_header = false;
+        current.model.reasoning = false;
+        let mut app = build_test_app(current.clone(), vec![current]);
+
+        let _ = app.handle_slash_command(SlashCommand::Thinking, "high");
+        let _ = app.handle_slash_command(SlashCommand::Thinking, "high");
+
+        let agent_guard = app.agent.try_lock().expect("agent lock");
+        assert_eq!(
+            agent_guard.stream_options().thinking_level,
+            Some(crate::model::ThinkingLevel::Off)
+        );
+        drop(agent_guard);
+
+        let session_guard = app.session.try_lock().expect("session lock");
+        assert_eq!(session_guard.header.thinking_level.as_deref(), Some("off"));
+        let thinking_changes = session_guard
+            .entries_for_current_path()
+            .iter()
+            .filter(|entry| matches!(entry, crate::session::SessionEntry::ThinkingLevelChange(_)))
+            .count();
+        assert_eq!(
+            thinking_changes, 1,
+            "reapplying the same effective thinking level should not add duplicate history"
+        );
+    }
+
+    #[test]
+    fn session_header_sync_updates_runtime_model_and_clamps_thinking() {
+        let current = model_entry("openai", "gpt-5.2", Some("old-key"), HashMap::new());
+        let mut next_headers = HashMap::new();
+        next_headers.insert("x-provider-header".to_string(), "next".to_string());
+        let mut next = model_entry("acme-local", "plain-model", None, next_headers.clone());
+        next.auth_header = false;
+        next.model.reasoning = false;
+        let mut app = build_test_app(current.clone(), vec![current, next.clone()]);
+
+        {
+            let mut guard = app.agent.try_lock().expect("agent lock");
+            guard.stream_options_mut().api_key = Some("stale-key".to_string());
+            let _ = guard
+                .stream_options_mut()
+                .headers
+                .insert("x-stale".to_string(), "old".to_string());
+            guard.stream_options_mut().thinking_level = Some(crate::model::ThinkingLevel::High);
+        }
+        {
+            let mut guard = app.session.try_lock().expect("session lock");
+            guard.header.provider = Some(next.model.provider.clone());
+            guard.header.model_id = Some(next.model.id);
+            guard.header.thinking_level = Some(crate::model::ThinkingLevel::High.to_string());
+        }
+
+        app.sync_runtime_selection_from_session_header()
+            .expect("sync runtime selection");
+
+        let agent_guard = app.agent.try_lock().expect("agent lock");
+        assert_eq!(agent_guard.provider().name(), "acme-local");
+        assert_eq!(agent_guard.provider().model_id(), "plain-model");
+        assert_eq!(agent_guard.stream_options().api_key, None);
+        assert_eq!(agent_guard.stream_options().headers, next_headers);
+        assert_eq!(
+            agent_guard.stream_options().thinking_level,
+            Some(crate::model::ThinkingLevel::Off)
+        );
+        drop(agent_guard);
+
+        assert_eq!(app.model, "acme-local/plain-model");
+        assert_eq!(app.model_entry.model.provider, "acme-local");
+        assert_eq!(app.model_entry.model.id, "plain-model");
+        let shared_guard = app.model_entry_shared.lock().expect("shared model lock");
+        assert_eq!(shared_guard.model.provider, "acme-local");
+        assert_eq!(shared_guard.model.id, "plain-model");
+        drop(shared_guard);
+
+        let session_guard = app.session.try_lock().expect("session lock");
+        assert_eq!(session_guard.header.thinking_level.as_deref(), Some("off"));
+        let thinking_changes = session_guard
+            .entries_for_current_path()
+            .iter()
+            .filter(|entry| matches!(entry, crate::session::SessionEntry::ThinkingLevelChange(_)))
+            .count();
+        assert_eq!(thinking_changes, 1);
+    }
+
+    #[test]
+    fn session_header_sync_rejects_missing_credentials_without_switching() {
+        let current = model_entry("openai", "gpt-4o-mini", Some("old-key"), HashMap::new());
+        let mut requires_creds = model_entry("acme-remote", "cloud-model", None, HashMap::new());
+        requires_creds.auth_header = true;
+        let mut app = build_test_app(current.clone(), vec![current, requires_creds]);
+
+        {
+            let mut guard = app.session.try_lock().expect("session lock");
+            guard.header.provider = Some("acme-remote".to_string());
+            guard.header.model_id = Some("cloud-model".to_string());
+        }
+
+        let err = app
+            .sync_runtime_selection_from_session_header()
+            .expect_err("missing credentials should fail closed");
+        assert_eq!(
+            err,
+            "Missing credentials for provider acme-remote. Run /login acme-remote."
+        );
+        assert_eq!(app.model, "openai/gpt-4o-mini");
+        assert_eq!(app.model_entry.model.provider, "openai");
+        assert_eq!(app.model_entry.model.id, "gpt-4o-mini");
     }
 
     #[test]

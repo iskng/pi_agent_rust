@@ -343,7 +343,11 @@ impl ExtensionSession for InteractiveExtensionSession {
             self.session.lock(&cx).await.map_err(|err| {
                 crate::error::Error::session(format!("session lock failed: {err}"))
             })?;
-        guard.append_model_change(provider.clone(), model_id.clone());
+        let changed = guard.header.provider.as_deref() != Some(provider.as_str())
+            || guard.header.model_id.as_deref() != Some(model_id.as_str());
+        if changed {
+            guard.append_model_change(provider.clone(), model_id.clone());
+        }
         guard.set_model_header(Some(provider), Some(model_id), None);
         if self.save_enabled {
             guard.save().await?;
@@ -361,13 +365,24 @@ impl ExtensionSession for InteractiveExtensionSession {
 
     async fn set_thinking_level(&self, level: String) -> crate::error::Result<()> {
         let cx = Cx::for_request();
+        let effective_level = match level.parse::<crate::model::ThinkingLevel>() {
+            Ok(parsed) => self
+                .model_entry
+                .lock()
+                .map(|entry| entry.clamp_thinking_level(parsed).to_string())
+                .unwrap_or(level),
+            Err(_) => level,
+        };
         let mut guard =
             self.session.lock(&cx).await.map_err(|err| {
                 crate::error::Error::session(format!("session lock failed: {err}"))
             })?;
-        guard.append_thinking_level_change(level.clone());
-        guard.set_model_header(None, None, Some(level));
-        if self.save_enabled {
+        let changed = guard.header.thinking_level.as_deref() != Some(effective_level.as_str());
+        guard.set_model_header(None, None, Some(effective_level.clone()));
+        if changed {
+            guard.append_thinking_level_change(effective_level);
+        }
+        if changed && self.save_enabled {
             guard.save().await?;
         }
         Ok(())
@@ -803,6 +818,85 @@ mod tests {
                 event_rx.try_recv().is_err(),
                 "nextTurn should stay deferred even when triggerTurn is set"
             );
+        });
+    }
+
+    #[test]
+    fn set_thinking_level_clamps_and_dedupes_for_non_reasoning_models() {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime build");
+
+        runtime.block_on(async {
+            let mut entry = dummy_model_entry();
+            entry.model.reasoning = false;
+            let session = Arc::new(Mutex::new(Session::in_memory()));
+            let ext_session = InteractiveExtensionSession {
+                session: Arc::clone(&session),
+                model_entry: Arc::new(StdMutex::new(entry)),
+                is_streaming: Arc::new(AtomicBool::new(false)),
+                is_compacting: Arc::new(AtomicBool::new(false)),
+                config: Config::default(),
+                save_enabled: false,
+            };
+
+            ext_session
+                .set_thinking_level("high".to_string())
+                .await
+                .expect("first thinking update");
+            ext_session
+                .set_thinking_level("high".to_string())
+                .await
+                .expect("second thinking update");
+
+            let cx = Cx::for_request();
+            let guard = session.lock(&cx).await.expect("lock session");
+            assert_eq!(guard.header.thinking_level.as_deref(), Some("off"));
+            let thinking_changes = guard
+                .entries_for_current_path()
+                .iter()
+                .filter(|entry| {
+                    matches!(entry, crate::session::SessionEntry::ThinkingLevelChange(_))
+                })
+                .count();
+            assert_eq!(thinking_changes, 1);
+        });
+    }
+
+    #[test]
+    fn set_model_avoids_duplicate_history_for_same_target() {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime build");
+
+        runtime.block_on(async {
+            let session = Arc::new(Mutex::new(Session::in_memory()));
+            let ext_session = InteractiveExtensionSession {
+                session: Arc::clone(&session),
+                model_entry: Arc::new(StdMutex::new(dummy_model_entry())),
+                is_streaming: Arc::new(AtomicBool::new(false)),
+                is_compacting: Arc::new(AtomicBool::new(false)),
+                config: Config::default(),
+                save_enabled: false,
+            };
+
+            ext_session
+                .set_model("anthropic".to_string(), "claude-sonnet-4-5".to_string())
+                .await
+                .expect("first model update");
+            ext_session
+                .set_model("anthropic".to_string(), "claude-sonnet-4-5".to_string())
+                .await
+                .expect("second model update");
+
+            let cx = Cx::for_request();
+            let guard = session.lock(&cx).await.expect("lock session");
+            let model_changes = guard
+                .entries_for_current_path()
+                .iter()
+                .filter(|entry| matches!(entry, crate::session::SessionEntry::ModelChange(_)))
+                .count();
+            assert_eq!(model_changes, 1);
         });
     }
 }

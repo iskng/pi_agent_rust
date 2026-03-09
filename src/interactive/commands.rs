@@ -675,7 +675,7 @@ impl PiApp {
         &mut self,
         next: &ModelEntry,
         provider_impl: std::sync::Arc<dyn crate::provider::Provider>,
-        resolved_key_opt: Option<String>,
+        resolved_key_opt: Option<&str>,
     ) -> Result<(), String> {
         let Ok(mut agent_guard) = self.agent.try_lock() else {
             return Err("Agent busy; try again".to_string());
@@ -683,6 +683,7 @@ impl PiApp {
         let Ok(mut session_guard) = self.session.try_lock() else {
             return Err("Session busy; try again".to_string());
         };
+        let resolved_key_opt = resolved_key_opt.map(str::to_string);
 
         let current_thinking = agent_guard
             .stream_options()
@@ -714,6 +715,102 @@ impl PiApp {
             *guard = next.clone();
         }
         self.model = format!("{}/{}", next.model.provider, next.model.id);
+        Ok(())
+    }
+
+    pub(super) fn sync_runtime_selection_from_session_header(&mut self) -> Result<(), String> {
+        let Ok(mut agent_guard) = self.agent.try_lock() else {
+            return Err("Agent busy; try again".to_string());
+        };
+        let Ok(mut session_guard) = self.session.try_lock() else {
+            return Err("Session busy; try again".to_string());
+        };
+
+        let (target_entry, sync_model) = match (
+            session_guard.header.provider.as_deref(),
+            session_guard.header.model_id.as_deref(),
+        ) {
+            (Some(provider), Some(model_id)) => {
+                if provider_ids_match(&self.model_entry.model.provider, provider)
+                    && self.model_entry.model.id.eq_ignore_ascii_case(model_id)
+                {
+                    (self.model_entry.clone(), true)
+                } else {
+                    (
+                        self.available_models
+                            .iter()
+                            .find(|entry| {
+                                provider_ids_match(&entry.model.provider, provider)
+                                    && entry.model.id.eq_ignore_ascii_case(model_id)
+                            })
+                            .cloned()
+                            .ok_or_else(|| {
+                                format!("Unable to switch provider/model to {provider}/{model_id}")
+                            })?,
+                        true,
+                    )
+                }
+            }
+            (None, None) => (self.model_entry.clone(), false),
+            _ => (self.model_entry.clone(), false),
+        };
+
+        let current_thinking = agent_guard
+            .stream_options()
+            .thinking_level
+            .unwrap_or_default();
+        let requested_thinking = session_thinking_level(&session_guard);
+        let effective_thinking =
+            target_entry.clamp_thinking_level(requested_thinking.unwrap_or(current_thinking));
+
+        let provider = agent_guard.provider();
+        let runtime_matches_target =
+            provider_ids_match(provider.name(), &target_entry.model.provider)
+                && provider
+                    .model_id()
+                    .eq_ignore_ascii_case(&target_entry.model.id);
+        if sync_model && !runtime_matches_target {
+            let resolved_key_opt = resolve_model_key_from_default_auth(&target_entry);
+            if model_requires_configured_credential(&target_entry) && resolved_key_opt.is_none() {
+                return Err(format!(
+                    "Missing credentials for provider {}. Run /login {}.",
+                    target_entry.model.provider, target_entry.model.provider
+                ));
+            }
+
+            let provider_impl = providers::create_provider(&target_entry, self.extensions.as_ref())
+                .map_err(|err| err.to_string())?;
+            agent_guard.set_provider(provider_impl);
+            let stream_options = agent_guard.stream_options_mut();
+            stream_options.api_key.clone_from(&resolved_key_opt);
+            stream_options.headers.clone_from(&target_entry.headers);
+        }
+        agent_guard.stream_options_mut().thinking_level = Some(effective_thinking);
+        drop(agent_guard);
+
+        let persist_needed = if let Some(previous_thinking) = requested_thinking
+            && previous_thinking != effective_thinking
+        {
+            session_guard.header.thinking_level = Some(effective_thinking.to_string());
+            session_guard.append_thinking_level_change(effective_thinking.to_string());
+            true
+        } else {
+            false
+        };
+        drop(session_guard);
+
+        if sync_model && !model_entry_matches(&self.model_entry, &target_entry) {
+            self.model_entry = target_entry.clone();
+            if let Ok(mut guard) = self.model_entry_shared.lock() {
+                *guard = target_entry.clone();
+            }
+            self.model = format!("{}/{}", target_entry.model.provider, target_entry.model.id);
+        }
+
+        if persist_needed {
+            self.spawn_save_session();
+        }
+
         Ok(())
     }
 
@@ -1973,7 +2070,9 @@ result in account suspension/ban. Prefer using an Anthropic API key (ANTHROPIC_A
             }
         };
 
-        if let Err(message) = self.switch_active_model(&next, provider_impl, resolved_key_opt) {
+        if let Err(message) =
+            self.switch_active_model(&next, provider_impl, resolved_key_opt.as_deref())
+        {
             self.status_message = Some(message);
             return None;
         }
@@ -2011,20 +2110,27 @@ result in account suspension/ban. Prefer using an Anthropic API key (ANTHROPIC_A
             }
         };
 
+        let effective_level = self.model_entry.clamp_thinking_level(level);
         let Ok(mut session_guard) = self.session.try_lock() else {
             self.status_message = Some("Session busy; try again".to_string());
             return None;
         };
-        session_guard.header.thinking_level = Some(level.to_string());
-        session_guard.append_thinking_level_change(level.to_string());
+        let previous_level = session_thinking_level(&session_guard);
+        session_guard.header.thinking_level = Some(effective_level.to_string());
+        let changed = previous_level != Some(effective_level);
+        if changed {
+            session_guard.append_thinking_level_change(effective_level.to_string());
+        }
         drop(session_guard);
-        self.spawn_save_session();
-
-        if let Ok(mut agent_guard) = self.agent.try_lock() {
-            agent_guard.stream_options_mut().thinking_level = Some(level);
+        if changed {
+            self.spawn_save_session();
         }
 
-        self.status_message = Some(format!("Thinking level: {level}"));
+        if let Ok(mut agent_guard) = self.agent.try_lock() {
+            agent_guard.stream_options_mut().thinking_level = Some(effective_level);
+        }
+
+        self.status_message = Some(format!("Thinking level: {effective_level}"));
         None
     }
 
