@@ -98,6 +98,8 @@ impl fmt::Display for FindingSeverity {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FindingCategory {
+    /// Input or scan failure prevented a trustworthy analysis.
+    AnalysisInput,
     /// Module import compatibility.
     ModuleCompat,
     /// Capability policy decision.
@@ -111,6 +113,7 @@ pub enum FindingCategory {
 impl fmt::Display for FindingCategory {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::AnalysisInput => f.write_str("analysis_input"),
             Self::ModuleCompat => f.write_str("module_compat"),
             Self::CapabilityPolicy => f.write_str("capability_policy"),
             Self::ForbiddenPattern => f.write_str("forbidden_pattern"),
@@ -488,12 +491,56 @@ impl<'a> PreflightAnalyzer<'a> {
     ///
     /// The path can be a single file or a directory containing extension source.
     pub fn analyze(&self, path: &Path) -> PreflightReport {
-        let ext_id = self.extension_id.unwrap_or("unknown").to_string();
+        let ext_id = self
+            .extension_id
+            .map(str::to_string)
+            .or_else(|| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| "unknown".to_string());
+
+        if !path.exists() {
+            return PreflightReport::from_findings(
+                ext_id,
+                vec![PreflightFinding {
+                    severity: FindingSeverity::Error,
+                    category: FindingCategory::AnalysisInput,
+                    message: format!("Extension path does not exist: {}", path.display()),
+                    remediation: Some(
+                        "Verify the extension path exists and points to a readable file or directory."
+                            .to_string(),
+                    ),
+                    file: Some(path.display().to_string()),
+                    line: None,
+                }],
+            );
+        }
 
         let scanner = CompatibilityScanner::new(path.to_path_buf());
-        let ledger = scanner
-            .scan_path(path)
-            .unwrap_or_else(|_| crate::extensions::CompatLedger::empty());
+        let ledger = match scanner.scan_path(path) {
+            Ok(ledger) => ledger,
+            Err(err) => {
+                return PreflightReport::from_findings(
+                    ext_id,
+                    vec![PreflightFinding {
+                        severity: FindingSeverity::Error,
+                        category: FindingCategory::AnalysisInput,
+                        message: format!(
+                            "Failed to scan extension source at {}: {err}",
+                            path.display()
+                        ),
+                        remediation: Some(
+                            "Verify the extension files are readable and retry the preflight check."
+                                .to_string(),
+                        ),
+                        file: Some(path.display().to_string()),
+                        line: None,
+                    }],
+                );
+            }
+        };
 
         let mut findings = Vec::new();
 
@@ -669,6 +716,8 @@ impl<'a> PreflightAnalyzer<'a> {
 
         for (cap, (file, line)) in &seen {
             let check = self.policy.evaluate_for(cap, self.extension_id);
+            let file = (!file.is_empty()).then(|| file.clone());
+            let line = (*line > 0).then_some(*line);
             match check.decision {
                 PolicyDecision::Deny => {
                     findings.push(PreflightFinding {
@@ -679,8 +728,8 @@ impl<'a> PreflightAnalyzer<'a> {
                             check.reason
                         ),
                         remediation: Some(capability_remediation(cap)),
-                        file: Some(file.clone()),
-                        line: Some(*line),
+                        file,
+                        line,
                     });
                 }
                 PolicyDecision::Prompt => {
@@ -693,8 +742,8 @@ impl<'a> PreflightAnalyzer<'a> {
                         remediation: Some(format!(
                             "To allow without prompting, add `{cap}` to default_caps in your extension policy config."
                         )),
-                        file: Some(file.clone()),
-                        line: Some(*line),
+                        file,
+                        line,
                     });
                 }
                 PolicyDecision::Allow => {}
@@ -3192,6 +3241,64 @@ pi.exec("ls");
         );
     }
 
+    #[test]
+    fn analyze_missing_path_fails_closed() {
+        let policy = ExtensionPolicy::default();
+        let analyzer = PreflightAnalyzer::new(&policy, None);
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let missing = temp_dir.path().join("missing-extension.js");
+
+        let report = analyzer.analyze(&missing);
+
+        assert_eq!(report.extension_id, "missing-extension.js");
+        assert_eq!(report.verdict, PreflightVerdict::Fail);
+        assert!(report.findings.iter().any(|finding| {
+            finding.category == FindingCategory::AnalysisInput
+                && finding.message.contains("does not exist")
+        }));
+    }
+
+    #[test]
+    fn analyze_uses_path_filename_when_extension_id_is_not_supplied() {
+        let policy = ExtensionPolicy::default();
+        let analyzer = PreflightAnalyzer::new(&policy, None);
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let entry = temp_dir.path().join("sample-ext.js");
+        std::fs::write(&entry, "export default function () {};\n").expect("write entry");
+
+        let report = analyzer.analyze(&entry);
+
+        assert_eq!(report.extension_id, "sample-ext.js");
+    }
+
+    #[test]
+    fn capability_findings_without_evidence_omit_bogus_location_fields() {
+        let policy = crate::extensions::PolicyProfile::Safe.to_policy();
+        let analyzer = PreflightAnalyzer::new(&policy, None);
+        let ledger = crate::extensions::CompatLedger {
+            schema: crate::extensions::COMPAT_LEDGER_SCHEMA_VERSION.to_string(),
+            capabilities: vec![crate::extensions::CompatCapabilityEvidence {
+                capability: "exec".to_string(),
+                reason: "test".to_string(),
+                evidence: Vec::new(),
+                remediation: None,
+            }],
+            rewrites: Vec::new(),
+            forbidden: Vec::new(),
+            flagged: Vec::new(),
+        };
+        let mut findings = Vec::new();
+
+        analyzer.check_capability_findings(&ledger, &mut findings);
+
+        let exec_finding = findings
+            .into_iter()
+            .find(|finding| finding.message.contains("exec"))
+            .expect("exec finding");
+        assert_eq!(exec_finding.file, None);
+        assert_eq!(exec_finding.line, None);
+    }
+
     // ---- Verdict display ----
 
     #[test]
@@ -3218,6 +3325,10 @@ pi.exec("ls");
 
     #[test]
     fn finding_category_display() {
+        assert_eq!(
+            format!("{}", FindingCategory::AnalysisInput),
+            "analysis_input"
+        );
         assert_eq!(
             format!("{}", FindingCategory::ModuleCompat),
             "module_compat"

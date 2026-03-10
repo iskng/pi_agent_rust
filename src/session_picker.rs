@@ -512,9 +512,7 @@ fn build_meta_from_jsonl(path: &Path) -> crate::error::Result<SessionMeta> {
 
 #[cfg(feature = "sqlite-sessions")]
 fn build_meta_from_sqlite(path: &Path) -> crate::error::Result<SessionMeta> {
-    let meta = futures::executor::block_on(async {
-        crate::session_sqlite::load_session_meta(path).await
-    })?;
+    let meta = futures::executor::block_on(crate::session_sqlite::load_session_meta(path))?;
     let header = meta.header;
     header.validate().map_err(|reason| {
         crate::error::Error::session(format!("Invalid session header: {reason}"))

@@ -705,8 +705,7 @@ pub fn load_skills(options: LoadSkillsOptions) -> LoadSkillsResult {
         );
     }
 
-    for path in options.skill_paths {
-        let resolved = path.clone();
+    for resolved in options.skill_paths {
         if !resolved.exists() {
             diagnostics.push(ResourceDiagnostic {
                 kind: DiagnosticKind::Warning,
