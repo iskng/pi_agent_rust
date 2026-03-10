@@ -51,12 +51,65 @@ fn finish_worker_result<T, E>(
     recv_result.map_err(|_| crate::Error::session(cancelled_message))?
 }
 
-fn finish_jsonl_worker_result<E>(
-    handle: thread::JoinHandle<()>,
-    recv_result: std::result::Result<Result<()>, E>,
-    cancelled_message: &'static str,
+fn save_jsonl_full_rewrite_blocking(
+    path: PathBuf,
+    sessions_root: PathBuf,
+    header: SessionHeader,
+    entries: Vec<SessionEntry>,
+    message_count: u64,
+    session_name: Option<String>,
 ) -> Result<()> {
-    finish_worker_result(handle, recv_result, cancelled_message)
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let temp_file = tempfile::NamedTempFile::new_in(parent)?;
+    {
+        let mut writer = std::io::BufWriter::with_capacity(1 << 20, temp_file.as_file());
+        serde_json::to_writer(&mut writer, &header)?;
+        writer.write_all(b"\n")?;
+        for entry in &entries {
+            serde_json::to_writer(&mut writer, entry)?;
+            writer.write_all(b"\n")?;
+        }
+        writer.flush()?;
+    }
+    temp_file
+        .persist(&path)
+        .map_err(|e| crate::Error::Io(Box::new(e.error)))?;
+
+    enqueue_session_index_snapshot_update(
+        &sessions_root,
+        &path,
+        &header,
+        message_count,
+        session_name,
+    );
+    Ok(())
+}
+
+fn append_jsonl_entries_blocking(
+    path: PathBuf,
+    sessions_root: PathBuf,
+    header: SessionHeader,
+    serialized_entries: Vec<u8>,
+    message_count: u64,
+    session_name: Option<String>,
+) -> Result<()> {
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .map_err(|e| crate::Error::Io(Box::new(e)))?;
+
+    file.lock_exclusive()?;
+    file.write_all(&serialized_entries)?;
+    FileExt::unlock(&file)?;
+
+    enqueue_session_index_snapshot_update(
+        &sessions_root,
+        &path,
+        &header,
+        message_count,
+        session_name,
+    );
+    Ok(())
 }
 
 /// Handle to a thread-safe shared session.
@@ -177,6 +230,8 @@ impl ExtensionSession for SessionHandle {
 
     async fn set_name(&self, name: String) -> Result<()> {
         let cx = AgentCx::for_current_or_request();
+        #[cfg(test)]
+        emit_set_name_deadline_probe(cx.budget().deadline);
         let mut session = self
             .0
             .lock(cx.cx())
@@ -1659,64 +1714,28 @@ impl Session {
 
                     let session_name = self.cached_name.clone();
                     // === Full rewrite path (first save, header change, checkpoint) ===
-                    let (tx, rx) = oneshot::channel::<Result<()>>();
-
                     let header_snapshot = self.header.clone();
                     let entries_to_save = self.entries.clone();
+                    let path_for_task = path_clone.clone();
+                    let sessions_root_for_task = sessions_root.clone();
+                    asupersync::runtime::spawn_blocking(move || {
+                        save_jsonl_full_rewrite_blocking(
+                            path_for_task,
+                            sessions_root_for_task,
+                            header_snapshot,
+                            entries_to_save,
+                            message_count,
+                            session_name,
+                        )
+                    })
+                    .await?;
 
-                    let path_for_thread = path_clone.clone();
-                    let handle = thread::spawn(move || {
-                        let entries = entries_to_save;
-                        let res = (|| -> Result<()> {
-                            let parent = path_for_thread.parent().unwrap_or_else(|| Path::new("."));
-                            let temp_file = tempfile::NamedTempFile::new_in(parent)?;
-                            {
-                                let mut writer =
-                                    std::io::BufWriter::with_capacity(1 << 20, temp_file.as_file());
-                                serde_json::to_writer(&mut writer, &header_snapshot)?;
-                                writer.write_all(b"\n")?;
-                                for entry in &entries {
-                                    serde_json::to_writer(&mut writer, entry)?;
-                                    writer.write_all(b"\n")?;
-                                }
-                                writer.flush()?;
-                            }
-                            temp_file
-                                .persist(&path_for_thread)
-                                .map_err(|e| crate::Error::Io(Box::new(e.error)))?;
-
-                            enqueue_session_index_snapshot_update(
-                                &sessions_root,
-                                &path_for_thread,
-                                &header_snapshot,
-                                message_count,
-                                session_name,
-                            );
-                            Ok(())
-                        })();
-                        let cx = AgentCx::for_request();
-                        if tx.send(cx.cx(), res).is_err() {
-                            tracing::debug!(
-                                "Session save task completed but receiver dropped (cancelled)"
-                            );
-                        }
-                    });
-
-                    let cx = AgentCx::for_request();
-                    let recv_result = rx.recv(cx.cx()).await;
-
-                    match finish_jsonl_worker_result(handle, recv_result, "Save task cancelled") {
-                        Ok(()) => {
-                            // Keep derived caches as-is: save path does not mutate entry ordering/content.
-                            self.persisted_entry_count
-                                .store(self.entries.len(), Ordering::SeqCst);
-                            self.header_dirty = false;
-                            self.appends_since_checkpoint = 0;
-                            self.v2_sidecar_stale = self.v2_sidecar_root.is_some();
-                            Ok(())
-                        }
-                        Err(err) => Err(err),
-                    }?;
+                    // Keep derived caches as-is: save path does not mutate entry ordering/content.
+                    self.persisted_entry_count
+                        .store(self.entries.len(), Ordering::SeqCst);
+                    self.header_dirty = false;
+                    self.appends_since_checkpoint = 0;
+                    self.v2_sidecar_stale = self.v2_sidecar_root.is_some();
                 } else {
                     let message_count = self.cached_message_count;
                     // === Incremental append path ===
@@ -1746,53 +1765,25 @@ impl Session {
                         }
                         let new_count = self.entries.len();
 
-                        let (tx, rx) = oneshot::channel::<Result<()>>();
                         let header_snapshot = self.header.clone();
+                        let path_for_task = path_clone.clone();
+                        let sessions_root_for_task = sessions_root.clone();
+                        asupersync::runtime::spawn_blocking(move || {
+                            append_jsonl_entries_blocking(
+                                path_for_task,
+                                sessions_root_for_task,
+                                header_snapshot,
+                                serialized_buf,
+                                message_count,
+                                session_name,
+                            )
+                        })
+                        .await?;
 
-                        let path_for_thread = path_clone.clone();
-                        let handle = thread::spawn(move || {
-                            let res = (move || -> Result<()> {
-                                let mut file = std::fs::OpenOptions::new()
-                                    .append(true)
-                                    .open(&path_for_thread)
-                                    .map_err(|e| crate::Error::Io(Box::new(e)))?;
-
-                                file.lock_exclusive()?;
-                                file.write_all(&serialized_buf)?;
-                                FileExt::unlock(&file)?;
-
-                                enqueue_session_index_snapshot_update(
-                                    &sessions_root,
-                                    &path_for_thread,
-                                    &header_snapshot,
-                                    message_count,
-                                    session_name,
-                                );
-                                Ok(())
-                            })();
-                            let cx = AgentCx::for_request();
-                            if tx.send(cx.cx(), res).is_err() {
-                                tracing::debug!(
-                                    "Session append task completed but receiver dropped (cancelled)"
-                                );
-                            }
-                        });
-
-                        let cx = AgentCx::for_request();
-                        let recv_result = rx.recv(cx.cx()).await;
-                        let result = finish_jsonl_worker_result(
-                            handle,
-                            recv_result,
-                            "Append task cancelled",
-                        );
-
-                        if result.is_ok() {
-                            self.persisted_entry_count
-                                .store(new_count, Ordering::SeqCst);
-                            self.appends_since_checkpoint += 1;
-                            self.v2_sidecar_stale = self.v2_sidecar_root.is_some();
-                        }
-                        result?;
+                        self.persisted_entry_count
+                            .store(new_count, Ordering::SeqCst);
+                        self.appends_since_checkpoint += 1;
+                        self.v2_sidecar_stale = self.v2_sidecar_root.is_some();
                     }
                     // No new entries → no-op, nothing to write.
                 }
@@ -4589,6 +4580,24 @@ fn generate_entry_id(existing: &HashSet<String>) -> String {
 }
 
 #[cfg(test)]
+fn set_name_deadline_probe()
+-> &'static std::sync::Mutex<Option<std::sync::mpsc::Sender<Option<asupersync::Time>>>> {
+    static PROBE: std::sync::OnceLock<
+        std::sync::Mutex<Option<std::sync::mpsc::Sender<Option<asupersync::Time>>>>,
+    > = std::sync::OnceLock::new();
+    PROBE.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+#[cfg(test)]
+fn emit_set_name_deadline_probe(deadline: Option<asupersync::Time>) {
+    let probe = set_name_deadline_probe();
+    let guard = probe.lock().expect("lock set_name deadline probe");
+    if let Some(tx) = guard.as_ref() {
+        let _ = tx.send(deadline);
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::model::{Cost, StopReason, Usage};
@@ -4992,6 +5001,60 @@ mod tests {
             assert!(
                 state.get("sessionName").is_none_or(Value::is_null),
                 "cancelled mutation should not update the session name: {state:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn session_handle_set_name_inherits_deadline() {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("build runtime");
+
+        runtime.block_on(async {
+            struct ProbeReset;
+            impl Drop for ProbeReset {
+                fn drop(&mut self) {
+                    let mut probe = set_name_deadline_probe()
+                        .lock()
+                        .expect("lock set_name deadline probe");
+                    *probe = None;
+                }
+            }
+
+            let session = Arc::new(Mutex::new(Session::in_memory()));
+            let handle = SessionHandle(Arc::clone(&session));
+
+            let (probe_tx, probe_rx) = std::sync::mpsc::channel();
+            {
+                let mut probe = set_name_deadline_probe()
+                    .lock()
+                    .expect("lock set_name deadline probe");
+                assert!(probe.is_none(), "set_name deadline probe already installed");
+                *probe = Some(probe_tx);
+            }
+            let _probe_reset = ProbeReset;
+
+            let expected_deadline = asupersync::time::wall_now() + Duration::from_secs(30);
+            let ambient_cx = AgentCx::for_request_with_budget(asupersync::Budget {
+                deadline: Some(expected_deadline),
+                ..asupersync::Budget::INFINITE
+            });
+            let _current = asupersync::Cx::set_current(Some(ambient_cx.cx().clone()));
+            handle
+                .set_name("deadline-name".to_string())
+                .await
+                .expect("set_name should succeed with inherited deadline");
+
+            let recorded = probe_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("set_name deadline probe");
+            assert_eq!(recorded, Some(expected_deadline));
+
+            let state = SessionHandle(Arc::clone(&session)).get_state().await;
+            assert_eq!(
+                state.get("sessionName").and_then(Value::as_str),
+                Some("deadline-name")
             );
         });
     }
@@ -8734,13 +8797,14 @@ mod tests {
     }
 
     #[test]
-    fn crash_finish_jsonl_worker_result_propagates_panic_before_cancellation() {
+    fn crash_finish_worker_result_propagates_panic_before_cancellation() {
         let handle = thread::spawn(|| -> () {
             panic!("jsonl worker panic");
         });
 
         let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _: Result<()> = finish_jsonl_worker_result(handle, Err(()), "Save task cancelled");
+            let _: Result<()> =
+                finish_worker_result::<(), _>(handle, Err(()), "Save task cancelled");
         }));
 
         assert!(
@@ -8750,11 +8814,11 @@ mod tests {
     }
 
     #[test]
-    fn crash_finish_jsonl_worker_result_maps_nonpanic_cancellation_to_session_error() {
+    fn crash_finish_worker_result_maps_nonpanic_cancellation_to_session_error() {
         let handle = thread::spawn(|| {});
 
-        let err =
-            finish_jsonl_worker_result(handle, Err(()), "Save task cancelled").expect_err("error");
+        let err = finish_worker_result::<(), _>(handle, Err(()), "Save task cancelled")
+            .expect_err("error");
 
         assert!(
             err.to_string().contains("Save task cancelled"),

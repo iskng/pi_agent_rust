@@ -4005,10 +4005,10 @@ async fn export_session(input_path: &str, output_path: Option<&str>) -> Result<P
 
     if let Some(parent) = output_path.parent() {
         if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)?;
+            asupersync::fs::create_dir_all(parent).await?;
         }
     }
-    std::fs::write(&output_path, html)?;
+    asupersync::fs::write(&output_path, html).await?;
     Ok(output_path)
 }
 

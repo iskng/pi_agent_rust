@@ -692,6 +692,7 @@ impl Agent {
         on_event: AgentEventHandler,
         abort: Option<AbortSignal>,
     ) -> Result<AssistantMessage> {
+        let loop_cx = crate::agent_cx::AgentCx::for_current_or_request();
         let session_id: Arc<str> = self
             .config
             .stream_options
@@ -790,7 +791,7 @@ impl Agent {
                 }
 
                 let assistant_message = match self
-                    .stream_assistant_response(Arc::clone(&on_event), abort.clone())
+                    .stream_assistant_response(Arc::clone(&on_event), abort.clone(), &loop_cx)
                     .await
                 {
                     Ok(msg) => msg,
@@ -1087,6 +1088,7 @@ impl Agent {
         &mut self,
         on_event: AgentEventHandler,
         abort: Option<AbortSignal>,
+        checkpoint_cx: &crate::agent_cx::AgentCx,
     ) -> Result<AssistantMessage> {
         // Build context and stream completion
         let provider = Arc::clone(&self.provider);
@@ -1099,7 +1101,44 @@ impl Agent {
         // Avoids cloning the full message on every event just to re-emit a redundant start.
         let mut sent_start = false;
 
-        loop {
+        'stream: loop {
+            if checkpoint_cx.checkpoint().is_err() {
+                let last_partial = if added_partial {
+                    match self
+                        .messages
+                        .iter()
+                        .rev()
+                        .find(|m| matches!(m, Message::Assistant(_)))
+                    {
+                        Some(Message::Assistant(a)) => Some(a.as_ref()),
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+                let abort_arc = Arc::new(self.build_abort_message(last_partial));
+                if !sent_start {
+                    on_event(AgentEvent::MessageStart {
+                        message: Message::Assistant(Arc::clone(&abort_arc)),
+                    });
+                    self.messages
+                        .push(Message::Assistant(Arc::clone(&abort_arc)));
+                    added_partial = true;
+                }
+                on_event(AgentEvent::MessageUpdate {
+                    message: Message::Assistant(Arc::clone(&abort_arc)),
+                    assistant_message_event: AssistantMessageEvent::Error {
+                        reason: StopReason::Aborted,
+                        error: Arc::clone(&abort_arc),
+                    },
+                });
+                return Ok(self.finalize_assistant_message(
+                    Arc::try_unwrap(abort_arc).unwrap_or_else(|a| (*a).clone()),
+                    &on_event,
+                    added_partial,
+                ));
+            }
+
             let event_result = if let Some(signal) = abort.as_ref() {
                 let abort_fut = signal.wait().fuse();
                 let event_fut = stream.next().fuse();
@@ -1148,7 +1187,25 @@ impl Agent {
                     futures::future::Either::Right((event, _abort_fut)) => event,
                 }
             } else {
-                stream.next().await
+                loop {
+                    let now = checkpoint_cx
+                        .cx()
+                        .timer_driver()
+                        .map_or_else(asupersync::time::wall_now, |timer| timer.now());
+                    let tick_fut =
+                        asupersync::time::sleep(now, std::time::Duration::from_millis(25)).fuse();
+                    let event_fut = stream.next().fuse();
+                    futures::pin_mut!(tick_fut, event_fut);
+
+                    match futures::future::select(tick_fut, event_fut).await {
+                        futures::future::Either::Left(((), _event_fut)) => {
+                            if checkpoint_cx.checkpoint().is_err() {
+                                continue 'stream;
+                            }
+                        }
+                        futures::future::Either::Right((result, _tick_fut)) => break result,
+                    }
+                }
             };
 
             let Some(event_result) = event_result else {
@@ -4095,6 +4152,61 @@ mod abort_tests {
             abort_handle.abort();
 
             let message = join.await.expect("run_text_with_abort");
+            assert_eq!(message.stop_reason, StopReason::Aborted);
+            assert_eq!(message.error_message.as_deref(), Some("Aborted"));
+        });
+    }
+
+    #[test]
+    fn ambient_cancellation_interrupts_in_flight_stream() {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime build");
+
+        runtime.block_on(async move {
+            let (started_tx, started_rx) = std::sync::mpsc::channel();
+
+            let provider = Arc::new(HangingProvider);
+            let tools = ToolRegistry::new(&[], Path::new("."), None);
+            let agent = Agent::new(provider, tools, AgentConfig::default());
+            let session = Arc::new(Mutex::new(Session::in_memory()));
+            let mut agent_session =
+                AgentSession::new(agent, session, false, ResolvedCompactionSettings::default());
+
+            let ambient_cx = asupersync::Cx::for_testing();
+            let cancel_cx = ambient_cx.clone();
+            let _current = asupersync::Cx::set_current(Some(ambient_cx));
+
+            let cancel_thread = std::thread::spawn(move || {
+                started_rx
+                    .recv_timeout(std::time::Duration::from_secs(1))
+                    .expect("stream start");
+                cancel_cx.set_cancel_requested(true);
+            });
+
+            let run = agent_session.run_text_with_abort("hello".to_string(), None, move |event| {
+                if matches!(
+                    event,
+                    AgentEvent::MessageStart {
+                        message: Message::Assistant(_)
+                    }
+                ) {
+                    let _ = started_tx.send(());
+                }
+            });
+            futures::pin_mut!(run);
+
+            let message = asupersync::time::timeout(
+                asupersync::time::wall_now(),
+                std::time::Duration::from_secs(1),
+                run,
+            )
+            .await
+            .expect("ambient cancellation should finish before timeout")
+            .expect("run_text_with_abort");
+
+            cancel_thread.join().expect("cancel thread");
+
             assert_eq!(message.stop_reason, StopReason::Aborted);
             assert_eq!(message.error_message.as_deref(), Some("Aborted"));
         });

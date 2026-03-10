@@ -618,9 +618,10 @@ impl PiApp {
 
         let agent = Arc::clone(&self.agent);
         let runtime_handle = self.runtime_handle.clone();
+        let task_cx = Cx::current().unwrap_or_else(Cx::for_request);
         runtime_handle.spawn(async move {
-            let cx = Cx::for_request();
-            if let Ok(mut agent_guard) = agent.lock(&cx).await {
+            let _current = Cx::set_current(Some(task_cx.clone()));
+            if let Ok(mut agent_guard) = agent.lock(&task_cx).await {
                 agent_guard.set_queue_modes(steering_mode, follow_up_mode);
             }
         });
@@ -1040,10 +1041,11 @@ impl PiApp {
         let session = Arc::clone(&self.session);
         let event_tx = self.event_tx.clone();
         let runtime_handle = self.runtime_handle.clone();
+        let task_cx = Cx::current().unwrap_or_else(Cx::for_request);
         runtime_handle.spawn(async move {
-            let cx = Cx::for_request();
+            let _current = Cx::set_current(Some(task_cx.clone()));
 
-            let mut session_guard = match session.lock(&cx).await {
+            let mut session_guard = match session.lock(&task_cx).await {
                 Ok(guard) => guard,
                 Err(err) => {
                     let _ = event_tx
@@ -1417,8 +1419,9 @@ impl PiApp {
             )
         };
 
+        let task_cx = Cx::current().unwrap_or_else(Cx::for_request);
         runtime_handle.spawn(async move {
-            let cx = Cx::for_request();
+            let _current = Cx::set_current(Some(task_cx.clone()));
 
             if let Some(manager) = extensions.clone() {
                 let cancelled = manager
@@ -1455,7 +1458,7 @@ impl PiApp {
 
             // Replace the session.
             {
-                let mut session_guard = match session.lock(&cx).await {
+                let mut session_guard = match session.lock(&task_cx).await {
                     Ok(guard) => guard,
                     Err(err) => {
                         let _ = event_tx
@@ -1468,7 +1471,7 @@ impl PiApp {
 
             // Update the agent messages.
             {
-                let mut agent_guard = match agent.lock(&cx).await {
+                let mut agent_guard = match agent.lock(&task_cx).await {
                     Ok(guard) => guard,
                     Err(err) => {
                         let _ = event_tx
@@ -1480,7 +1483,7 @@ impl PiApp {
             }
 
             let (messages, usage) = {
-                let session_guard = match session.lock(&cx).await {
+                let session_guard = match session.lock(&task_cx).await {
                     Ok(guard) => guard,
                     Err(err) => {
                         let _ = event_tx
@@ -1553,9 +1556,10 @@ pub async fn run_interactive(
     let (event_tx, event_rx) = mpsc::channel::<PiMsg>(1024);
     let (ui_tx, ui_rx) = std::sync::mpsc::channel::<Message>();
 
+    let ui_bridge_cx = Cx::current().unwrap_or_else(Cx::for_request);
     runtime_handle.spawn(async move {
-        let cx = Cx::for_request();
-        while let Ok(msg) = event_rx.recv(&cx).await {
+        let _current = Cx::set_current(Some(ui_bridge_cx.clone()));
+        while let Ok(msg) = event_rx.recv(&ui_bridge_cx).await {
             if matches!(msg, PiMsg::UiShutdown) {
                 break;
             }
@@ -1570,9 +1574,10 @@ pub async fn run_interactive(
         manager.set_ui_sender(extension_ui_tx);
 
         let extension_event_tx = event_tx.clone();
+        let extension_ui_cx = Cx::current().unwrap_or_else(Cx::for_request);
         runtime_handle.spawn(async move {
-            let cx = Cx::for_request();
-            while let Ok(request) = extension_ui_rx.recv(&cx).await {
+            let _current = Cx::set_current(Some(extension_ui_cx.clone()));
+            while let Ok(request) = extension_ui_rx.recv(&extension_ui_cx).await {
                 let _ = extension_event_tx.try_send(PiMsg::ExtensionUiRequest(request));
             }
         });

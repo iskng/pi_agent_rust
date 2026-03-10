@@ -980,7 +980,9 @@ impl PiApp {
         });
 
         let cmd_for_msg = command_name.clone();
+        let task_cx = Cx::current().unwrap_or_else(Cx::for_request);
         runtime_handle.spawn(async move {
+            let _current = Cx::set_current(Some(task_cx));
             let result = runtime
                 .execute_command(
                     command_name,
@@ -1044,7 +1046,9 @@ impl PiApp {
         });
 
         let key_for_msg = key_id_owned.clone();
+        let task_cx = Cx::current().unwrap_or_else(Cx::for_request);
         runtime_handle.spawn(async move {
+            let _current = Cx::set_current(Some(task_cx));
             let result = runtime
                 .execute_shortcut(
                     key_id_owned,
@@ -1198,16 +1202,19 @@ impl PiApp {
         self.scroll_to_bottom();
 
         let runtime_handle_for_task = runtime_handle.clone();
+        let task_cx = Cx::current().unwrap_or_else(Cx::for_request);
         runtime_handle.spawn(async move {
+            let _current = Cx::set_current(Some(task_cx.clone()));
+            #[cfg(test)]
+            emit_submit_continue_deadline_probe(task_cx.budget().deadline);
             if let Some(manager) = extensions.clone() {
                 let _ = manager
                     .dispatch_event(ExtensionEventName::BeforeAgentStart, None)
                     .await;
             }
 
-            let cx = Cx::for_request();
             let mut agent_guard =
-                match asupersync::sync::OwnedMutexGuard::lock(Arc::clone(&agent), &cx).await {
+                match asupersync::sync::OwnedMutexGuard::lock(Arc::clone(&agent), &task_cx).await {
                     Ok(guard) => guard,
                     Err(err) => {
                         let _ = event_tx
@@ -1249,7 +1256,8 @@ impl PiApp {
             drop(agent_guard);
 
             let mut session_guard =
-                match asupersync::sync::OwnedMutexGuard::lock(Arc::clone(&session), &cx).await {
+                match asupersync::sync::OwnedMutexGuard::lock(Arc::clone(&session), &task_cx).await
+                {
                     Ok(guard) => guard,
                     Err(err) => {
                         let _ = event_tx
@@ -1335,7 +1343,9 @@ impl PiApp {
         self.abort_handle = Some(abort_handle);
 
         let runtime_handle_for_task = runtime_handle.clone();
+        let task_cx = Cx::current().unwrap_or_else(Cx::for_request);
         runtime_handle.spawn(async move {
+            let _current = Cx::set_current(Some(task_cx.clone()));
             let mut content_for_agent = content_for_agent;
             if let Some(manager) = extensions.clone() {
                 let (text, images) = split_content_blocks_for_input(&content_for_agent);
@@ -1364,9 +1374,8 @@ impl PiApp {
                     .await;
             }
 
-            let cx = Cx::for_request();
             let mut agent_guard =
-                match asupersync::sync::OwnedMutexGuard::lock(Arc::clone(&agent), &cx).await {
+                match asupersync::sync::OwnedMutexGuard::lock(Arc::clone(&agent), &task_cx).await {
                     Ok(guard) => guard,
                     Err(err) => {
                         let _ = event_tx
@@ -1408,7 +1417,8 @@ impl PiApp {
             drop(agent_guard);
 
             let mut session_guard =
-                match asupersync::sync::OwnedMutexGuard::lock(Arc::clone(&session), &cx).await {
+                match asupersync::sync::OwnedMutexGuard::lock(Arc::clone(&session), &task_cx).await
+                {
                     Ok(guard) => guard,
                     Err(err) => {
                         let _ = event_tx
@@ -1568,7 +1578,9 @@ impl PiApp {
 
         // Spawn async task to run the agent
         let runtime_handle_for_agent = runtime_handle.clone();
+        let task_cx = Cx::current().unwrap_or_else(Cx::for_request);
         runtime_handle.spawn(async move {
+            let _current = Cx::set_current(Some(task_cx.clone()));
             let mut message_for_agent = message_for_agent;
             let mut input_images = Vec::new();
             if let Some(manager) = extensions.clone() {
@@ -1598,9 +1610,8 @@ impl PiApp {
                     .await;
             }
 
-            let cx = Cx::for_request();
             let mut agent_guard =
-                match asupersync::sync::OwnedMutexGuard::lock(Arc::clone(&agent), &cx).await {
+                match asupersync::sync::OwnedMutexGuard::lock(Arc::clone(&agent), &task_cx).await {
                     Ok(guard) => guard,
                     Err(err) => {
                         let _ = event_tx
@@ -1666,7 +1677,8 @@ impl PiApp {
             drop(agent_guard);
 
             let mut session_guard =
-                match asupersync::sync::OwnedMutexGuard::lock(Arc::clone(&session), &cx).await {
+                match asupersync::sync::OwnedMutexGuard::lock(Arc::clone(&session), &task_cx).await
+                {
                     Ok(guard) => guard,
                     Err(err) => {
                         let _ = event_tx
@@ -1696,6 +1708,24 @@ impl PiApp {
         });
 
         None
+    }
+}
+
+#[cfg(test)]
+fn submit_continue_deadline_probe()
+-> &'static std::sync::Mutex<Option<std::sync::mpsc::Sender<Option<asupersync::Time>>>> {
+    static PROBE: std::sync::OnceLock<
+        std::sync::Mutex<Option<std::sync::mpsc::Sender<Option<asupersync::Time>>>>,
+    > = std::sync::OnceLock::new();
+    PROBE.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+#[cfg(test)]
+fn emit_submit_continue_deadline_probe(deadline: Option<asupersync::Time>) {
+    let probe = submit_continue_deadline_probe();
+    let guard = probe.lock().expect("lock submit_continue deadline probe");
+    if let Some(tx) = guard.as_ref() {
+        let _ = tx.send(deadline);
     }
 }
 
@@ -2037,14 +2067,19 @@ mod stream_delta_batcher_tests {
             match event_rx.try_recv() {
                 Ok(PiMsg::AgentDone { .. }) => {
                     saw_done = true;
-                    break;
                 }
                 Ok(_) => {}
-                Err(_) => std::thread::sleep(std::time::Duration::from_millis(10)),
+                Err(_) => {}
             }
+
+            if saw_done && state.calls.load(Ordering::SeqCst) == 1 {
+                break;
+            }
+
+            std::thread::sleep(std::time::Duration::from_millis(10));
         }
 
-        assert!(saw_done, "continue path should finish an agent turn");
+        assert!(saw_done, "submit_message path should finish an agent turn");
         assert_eq!(state.calls.load(Ordering::SeqCst), 1);
         assert!(
             state.saw_custom_message.load(Ordering::SeqCst),
@@ -2054,6 +2089,148 @@ mod stream_delta_batcher_tests {
             !state.saw_user_message.load(Ordering::SeqCst),
             "continue path should not synthesize a user message"
         );
+    }
+
+    #[test]
+    fn spawn_save_session_inherits_cancelled_context_when_session_lock_is_held() {
+        let (app, event_rx) = build_test_app_with_provider(Arc::new(DummyProvider));
+
+        runtime().block_on(async {
+            let hold_cx = Cx::for_request();
+            let _held_guard =
+                asupersync::sync::OwnedMutexGuard::lock(Arc::clone(&app.session), &hold_cx)
+                    .await
+                    .expect("lock session");
+
+            let ambient_cx = Cx::for_testing();
+            ambient_cx.set_cancel_requested(true);
+            let _current = Cx::set_current(Some(ambient_cx));
+
+            app.spawn_save_session();
+
+            let recv_cx = Cx::for_testing();
+            let wait_for_error = async {
+                loop {
+                    match event_rx.recv(&recv_cx).await {
+                        Ok(PiMsg::AgentError(message))
+                            if message.contains("Failed to lock session") =>
+                        {
+                            break message;
+                        }
+                        Ok(_) => {}
+                        Err(err) => panic!("event receive failed: {err}"),
+                    }
+                }
+            };
+            futures::pin_mut!(wait_for_error);
+            let err = asupersync::time::timeout(
+                asupersync::time::wall_now(),
+                std::time::Duration::from_secs(1),
+                wait_for_error,
+            )
+            .await
+            .expect("cancelled save task should finish before timeout");
+
+            assert!(
+                err.contains("Failed to lock session"),
+                "unexpected save-task error: {err}"
+            );
+        });
+    }
+
+    #[test]
+    fn submit_continue_inherits_cancelled_context_when_agent_lock_is_attempted() {
+        let (mut app, event_rx) = build_test_app_with_provider(Arc::new(DummyProvider));
+
+        runtime().block_on(async {
+            let ambient_cx = Cx::for_testing();
+            ambient_cx.set_cancel_requested(true);
+            let _current = Cx::set_current(Some(ambient_cx));
+
+            let _ = app.submit_continue();
+
+            let recv_cx = Cx::for_testing();
+            let wait_for_terminal = async {
+                loop {
+                    match event_rx.recv(&recv_cx).await {
+                        Ok(PiMsg::AgentError(message)) => break format!("error:{message}"),
+                        Ok(PiMsg::AgentDone { error_message, .. }) => {
+                            break format!("done:{}", error_message.unwrap_or_default());
+                        }
+                        Ok(_) => {}
+                        Err(err) => panic!("event receive failed: {err}"),
+                    }
+                }
+            };
+            futures::pin_mut!(wait_for_terminal);
+            let outcome = asupersync::time::timeout(
+                asupersync::time::wall_now(),
+                std::time::Duration::from_secs(1),
+                wait_for_terminal,
+            )
+            .await
+            .expect("cancelled continue task should reach provider before timeout");
+
+            assert!(
+                outcome.contains("Failed to lock agent"),
+                "unexpected continue-task outcome: {outcome}"
+            );
+        });
+    }
+
+    #[test]
+    fn submit_continue_inherits_deadline_into_spawned_task() {
+        struct ProbeReset;
+        impl Drop for ProbeReset {
+            fn drop(&mut self) {
+                let mut probe = submit_continue_deadline_probe()
+                    .lock()
+                    .expect("lock submit_continue deadline probe");
+                *probe = None;
+            }
+        }
+
+        let (mut app, _event_rx) = build_test_app_with_provider(Arc::new(DummyProvider));
+
+        let (probe_tx, probe_rx) = std::sync::mpsc::channel();
+        {
+            let mut probe = submit_continue_deadline_probe()
+                .lock()
+                .expect("lock submit_continue deadline probe");
+            assert!(
+                probe.is_none(),
+                "submit_continue deadline probe already installed"
+            );
+            *probe = Some(probe_tx);
+        }
+        let _probe_reset = ProbeReset;
+
+        runtime().block_on(async {
+            let cx = Cx::for_request();
+            let mut guard = asupersync::sync::OwnedMutexGuard::lock(Arc::clone(&app.agent), &cx)
+                .await
+                .expect("lock agent");
+            guard.add_message(ModelMessage::Custom(CustomMessage {
+                content: "continue-now".to_string(),
+                custom_type: "note".to_string(),
+                display: true,
+                details: None,
+                timestamp: 0,
+            }));
+        });
+
+        let expected_deadline = asupersync::time::wall_now() + std::time::Duration::from_secs(30);
+        let ambient_cx = Cx::for_testing_with_budget(
+            asupersync::Budget::INFINITE.with_deadline(expected_deadline),
+        );
+        let _current = Cx::set_current(Some(ambient_cx));
+
+        let _ = app.handle_pi_message(PiMsg::EnqueuePendingInput(PendingInput::Continue));
+
+        let recorded = probe_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("submit_continue deadline probe");
+        assert_eq!(recorded, Some(expected_deadline));
     }
 
     #[test]
