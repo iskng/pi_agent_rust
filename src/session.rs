@@ -52,10 +52,10 @@ fn finish_worker_result<T, E>(
 }
 
 fn save_jsonl_full_rewrite_blocking(
-    path: PathBuf,
-    sessions_root: PathBuf,
-    header: SessionHeader,
-    entries: Vec<SessionEntry>,
+    path: &Path,
+    sessions_root: &Path,
+    header: &SessionHeader,
+    entries: &[SessionEntry],
     message_count: u64,
     session_name: Option<String>,
 ) -> Result<()> {
@@ -63,52 +63,40 @@ fn save_jsonl_full_rewrite_blocking(
     let temp_file = tempfile::NamedTempFile::new_in(parent)?;
     {
         let mut writer = std::io::BufWriter::with_capacity(1 << 20, temp_file.as_file());
-        serde_json::to_writer(&mut writer, &header)?;
+        serde_json::to_writer(&mut writer, header)?;
         writer.write_all(b"\n")?;
-        for entry in &entries {
+        for entry in entries {
             serde_json::to_writer(&mut writer, entry)?;
             writer.write_all(b"\n")?;
         }
         writer.flush()?;
     }
     temp_file
-        .persist(&path)
+        .persist(path)
         .map_err(|e| crate::Error::Io(Box::new(e.error)))?;
 
-    enqueue_session_index_snapshot_update(
-        &sessions_root,
-        &path,
-        &header,
-        message_count,
-        session_name,
-    );
+    enqueue_session_index_snapshot_update(sessions_root, path, header, message_count, session_name);
     Ok(())
 }
 
 fn append_jsonl_entries_blocking(
-    path: PathBuf,
-    sessions_root: PathBuf,
-    header: SessionHeader,
-    serialized_entries: Vec<u8>,
+    path: &Path,
+    sessions_root: &Path,
+    header: &SessionHeader,
+    serialized_entries: &[u8],
     message_count: u64,
     session_name: Option<String>,
 ) -> Result<()> {
     let mut file = std::fs::OpenOptions::new()
         .append(true)
-        .open(&path)
+        .open(path)
         .map_err(|e| crate::Error::Io(Box::new(e)))?;
 
     file.lock_exclusive()?;
-    file.write_all(&serialized_entries)?;
+    file.write_all(serialized_entries)?;
     FileExt::unlock(&file)?;
 
-    enqueue_session_index_snapshot_update(
-        &sessions_root,
-        &path,
-        &header,
-        message_count,
-        session_name,
-    );
+    enqueue_session_index_snapshot_update(sessions_root, path, header, message_count, session_name);
     Ok(())
 }
 
@@ -1720,10 +1708,10 @@ impl Session {
                     let sessions_root_for_task = sessions_root.clone();
                     asupersync::runtime::spawn_blocking(move || {
                         save_jsonl_full_rewrite_blocking(
-                            path_for_task,
-                            sessions_root_for_task,
-                            header_snapshot,
-                            entries_to_save,
+                            &path_for_task,
+                            &sessions_root_for_task,
+                            &header_snapshot,
+                            &entries_to_save,
                             message_count,
                             session_name,
                         )
@@ -1770,10 +1758,10 @@ impl Session {
                         let sessions_root_for_task = sessions_root.clone();
                         asupersync::runtime::spawn_blocking(move || {
                             append_jsonl_entries_blocking(
-                                path_for_task,
-                                sessions_root_for_task,
-                                header_snapshot,
-                                serialized_buf,
+                                &path_for_task,
+                                &sessions_root_for_task,
+                                &header_snapshot,
+                                &serialized_buf,
                                 message_count,
                                 session_name,
                             )

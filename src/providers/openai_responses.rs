@@ -309,15 +309,21 @@ impl Provider for OpenAIResponsesProvider {
 
         // Validate Content-Type when present. If the header is missing entirely
         // (as with some OpenAI Codex endpoints), proceed optimistically since the
-        // SSE parser will fail gracefully on non-SSE data. If the header IS present
-        // and indicates a non-streaming type, reject early.
+        // wire framing may still be SSE. If the header IS present and indicates
+        // a non-SSE type, reject early so we fail closed instead of silently
+        // dropping events in the SSE parser.
         let content_type = response
             .headers()
             .iter()
             .find(|(name, _)| name.eq_ignore_ascii_case("content-type"))
             .map(|(_, value)| value.to_ascii_lowercase());
         if let Some(ref ct) = content_type {
-            if !ct.contains("text/event-stream") && !ct.contains("application/x-ndjson") {
+            if ct.contains("application/x-ndjson") {
+                return Err(Error::api(format!(
+                    "OpenAI API protocol error (HTTP {status}): unsupported Content-Type {ct} (NDJSON streaming is not yet supported; expected text/event-stream)"
+                )));
+            }
+            if !ct.contains("text/event-stream") {
                 return Err(Error::api(format!(
                     "OpenAI API protocol error (HTTP {status}): unexpected Content-Type {ct} (expected text/event-stream)"
                 )));
@@ -2447,6 +2453,40 @@ mod tests {
                 .map(String::as_str),
             Some("acct_compat_456")
         );
+    }
+
+    #[test]
+    fn test_stream_rejects_ndjson_content_type_without_parser_support() {
+        let body = concat!(
+            "{\"type\":\"response.output_text.delta\",\"item_id\":\"msg_1\",\"content_index\":0,\"delta\":\"ok\"}\n",
+            "{\"type\":\"response.completed\",\"response\":{\"incomplete_details\":null,\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n"
+        );
+        let (base_url, _rx) = spawn_test_server(200, "application/x-ndjson", body);
+        let provider = OpenAIResponsesProvider::new("gpt-4o").with_base_url(base_url);
+        let context = Context::owned(
+            None,
+            vec![Message::User(crate::model::UserMessage {
+                content: UserContent::Text("ping".to_string()),
+                timestamp: 0,
+            })],
+            Vec::new(),
+        );
+        let options = StreamOptions {
+            api_key: Some("test-openai-key".to_string()),
+            ..Default::default()
+        };
+
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime build");
+        runtime.block_on(async {
+            let Err(err) = provider.stream(&context, &options).await else {
+                panic!("ndjson should be rejected until a parser exists");
+            };
+            let err_text = err.to_string();
+            assert!(err_text.contains("unsupported Content-Type"));
+            assert!(err_text.contains("application/x-ndjson"));
+        });
     }
 
     fn collect_events(events: &[Value]) -> Vec<StreamEvent> {

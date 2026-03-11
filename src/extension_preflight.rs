@@ -990,6 +990,9 @@ pub enum SecurityRuleId {
     /// `arguments.callee.caller` stack introspection.
     #[serde(rename = "SEC-ARGUMENTS-001")]
     ArgumentsCallerAccess,
+    /// Security scan input was missing or unreadable, preventing trustworthy analysis.
+    #[serde(rename = "SEC-SCAN-001")]
+    ScanInputFailure,
 }
 
 impl SecurityRuleId {
@@ -1023,6 +1026,7 @@ impl SecurityRuleId {
             Self::SocketListener => "socket-listener",
             Self::WebAssemblyUsage => "webassembly-usage",
             Self::ArgumentsCallerAccess => "arguments-caller-access",
+            Self::ScanInputFailure => "scan-input-failure",
         }
     }
 
@@ -1065,6 +1069,8 @@ impl SecurityRuleId {
                 | Self::ArgumentsCallerAccess
         ) {
             RiskTier::Medium
+        } else if matches!(self, Self::ScanInputFailure) {
+            RiskTier::High
         } else {
             RiskTier::Low
         }
@@ -1157,10 +1163,11 @@ pub struct SecurityTierCounts {
 
 /// Current rulebook version. Bump when rules are added or changed.
 ///
+/// v2.1.0: Added SEC-SCAN-001 so missing/unreadable extension paths fail closed.
 /// v2.0.0: Added 9 rules (SEC-SPAWN-001, SEC-CONSTRUCTOR-001, SEC-NATIVEMOD-001,
 ///   SEC-GLOBAL-001, SEC-SYMLINK-001, SEC-CHMOD-001, SEC-SOCKET-001,
 ///   SEC-WASM-001, SEC-ARGUMENTS-001). Stabilized deterministic sort order.
-pub const SECURITY_RULEBOOK_VERSION: &str = "2.0.0";
+pub const SECURITY_RULEBOOK_VERSION: &str = "2.1.0";
 
 impl SecurityScanReport {
     /// Build from a list of findings.
@@ -1330,6 +1337,21 @@ pub fn security_evidence_ledger_jsonl(
 pub struct SecurityScanner;
 
 impl SecurityScanner {
+    const fn scan_input_failure_finding(
+        file: Option<String>,
+        rationale: String,
+    ) -> SecurityFinding {
+        SecurityFinding {
+            rule_id: SecurityRuleId::ScanInputFailure,
+            risk_tier: SecurityRuleId::ScanInputFailure.default_tier(),
+            rationale,
+            file,
+            line: None,
+            column: None,
+            snippet: None,
+        }
+    }
+
     /// Scan raw source text and produce a security scan report.
     #[must_use]
     pub fn scan_source(extension_id: &str, source: &str) -> SecurityScanReport {
@@ -1356,14 +1378,51 @@ impl SecurityScanner {
 
     /// Scan extension files under a directory.
     pub fn scan_path(extension_id: &str, path: &Path, root: &Path) -> SecurityScanReport {
-        let files = collect_scannable_files(path);
+        if !path.exists() {
+            return SecurityScanReport::from_findings(
+                extension_id.to_string(),
+                vec![Self::scan_input_failure_finding(
+                    Some(path.display().to_string()),
+                    format!(
+                        "Extension path does not exist, so the security scan could not inspect any source: {}",
+                        path.display()
+                    ),
+                )],
+            );
+        }
+
+        let files = match collect_scannable_files(path) {
+            Ok(files) => files,
+            Err(err) => {
+                return SecurityScanReport::from_findings(
+                    extension_id.to_string(),
+                    vec![Self::scan_input_failure_finding(
+                        Some(path.display().to_string()),
+                        format!(
+                            "Failed to enumerate extension source at {}: {err}",
+                            path.display()
+                        ),
+                    )],
+                );
+            }
+        };
         let mut findings = Vec::new();
 
         for file_path in &files {
-            let Ok(content) = std::fs::read_to_string(file_path) else {
-                continue;
-            };
             let rel = relative_posix_path(root, file_path);
+            let content = match std::fs::read_to_string(file_path) {
+                Ok(content) => content,
+                Err(err) => {
+                    findings.push(Self::scan_input_failure_finding(
+                        Some(rel),
+                        format!(
+                            "Failed to read extension source at {}: {err}",
+                            file_path.display()
+                        ),
+                    ));
+                    continue;
+                }
+            };
             let mut in_block_comment = false;
 
             for (idx, raw_line) in content.lines().enumerate() {
@@ -2120,43 +2179,46 @@ fn truncate_snippet(text: &str) -> String {
 }
 
 /// Collect JS/TS files from a path (file or directory).
-fn collect_scannable_files(path: &Path) -> Vec<std::path::PathBuf> {
+fn collect_scannable_files(path: &Path) -> std::io::Result<Vec<std::path::PathBuf>> {
     if path.is_file() {
-        return vec![path.to_path_buf()];
+        return Ok(vec![path.to_path_buf()]);
     }
     let mut files = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(path) {
-        for entry in entries.flatten() {
-            let p = entry.path();
-            if p.is_dir() {
-                // Skip node_modules and hidden dirs.
-                let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                if name == "node_modules" || name.starts_with('.') {
-                    continue;
-                }
-                files.extend(collect_scannable_files(&p));
-            } else if p.is_file() {
-                if let Some(ext) = p.extension().and_then(|e| e.to_str()) {
-                    if matches!(
-                        ext,
-                        "js" | "ts" | "mjs" | "mts" | "cjs" | "cts" | "jsx" | "tsx"
-                    ) {
-                        files.push(p);
-                    }
+    for entry in std::fs::read_dir(path)? {
+        let entry = entry?;
+        let p = entry.path();
+        if p.is_dir() {
+            // Skip node_modules and hidden dirs.
+            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if name == "node_modules" || name.starts_with('.') {
+                continue;
+            }
+            files.extend(collect_scannable_files(&p)?);
+        } else if p.is_file() {
+            if let Some(ext) = p.extension().and_then(|e| e.to_str()) {
+                if matches!(
+                    ext,
+                    "js" | "ts" | "mjs" | "mts" | "cjs" | "cts" | "jsx" | "tsx"
+                ) {
+                    files.push(p);
                 }
             }
         }
     }
     files.sort();
-    files
+    Ok(files)
 }
 
 /// Compute relative POSIX path from root to path.
 fn relative_posix_path(root: &Path, path: &Path) -> String {
-    path.strip_prefix(root)
-        .unwrap_or(path)
-        .to_string_lossy()
-        .replace('\\', "/")
+    let relative = path.strip_prefix(root).unwrap_or(path);
+    if relative.as_os_str().is_empty() {
+        return path.file_name().and_then(|name| name.to_str()).map_or_else(
+            || path.to_string_lossy().replace('\\', "/"),
+            ToString::to_string,
+        );
+    }
+    relative.to_string_lossy().replace('\\', "/")
 }
 
 /// Strip block comments for security scanning. Simpler than the full
@@ -3545,6 +3607,11 @@ pi.exec("ls");
         assert_eq!(json, "\"SEC-EVAL-001\"");
         let back: SecurityRuleId = serde_json::from_str(&json).unwrap();
         assert_eq!(rule, back);
+
+        let json = serde_json::to_string(&SecurityRuleId::ScanInputFailure).unwrap();
+        assert_eq!(json, "\"SEC-SCAN-001\"");
+        let back: SecurityRuleId = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, SecurityRuleId::ScanInputFailure);
     }
 
     #[test]
@@ -3564,6 +3631,11 @@ pi.exec("ls");
         assert_eq!(
             SecurityRuleId::ProcessEnvAccess.default_tier(),
             RiskTier::Medium
+        );
+        // Scan input failures should force manual review.
+        assert_eq!(
+            SecurityRuleId::ScanInputFailure.default_tier(),
+            RiskTier::High
         );
         // Low.
         assert_eq!(
@@ -3590,6 +3662,41 @@ export default function init(pi) {
         assert!(report.verdict.starts_with("CLEAN"));
         assert!(!report.should_block());
         assert!(!report.needs_review());
+    }
+
+    #[test]
+    fn scan_path_missing_path_fails_closed() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let missing = temp_dir.path().join("missing-ext.js");
+        let missing_display = missing.display().to_string();
+
+        let report = SecurityScanner::scan_path("missing-ext", &missing, &missing);
+
+        assert_eq!(report.overall_tier, RiskTier::High);
+        assert!(report.needs_review());
+        let finding = report
+            .findings
+            .iter()
+            .find(|finding| finding.rule_id == SecurityRuleId::ScanInputFailure)
+            .expect("scan input failure finding");
+        assert_eq!(finding.file.as_deref(), Some(missing_display.as_str()));
+        assert!(finding.rationale.contains("does not exist"));
+    }
+
+    #[test]
+    fn scan_path_single_file_preserves_filename_location() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let entry = temp_dir.path().join("single-file.js");
+        std::fs::write(&entry, "eval('bad');\n").unwrap();
+
+        let report = SecurityScanner::scan_path("single-file", &entry, &entry);
+
+        let finding = report
+            .findings
+            .iter()
+            .find(|finding| finding.rule_id == SecurityRuleId::EvalUsage)
+            .expect("eval finding");
+        assert_eq!(finding.file.as_deref(), Some("single-file.js"));
     }
 
     // ---- Critical tier detections ----
