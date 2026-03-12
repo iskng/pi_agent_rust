@@ -114,7 +114,14 @@ impl CliTestHarness {
         self.env
             .get("PI_CONFIG_PATH")
             .map(PathBuf::from)
-            .expect("PI_CONFIG_PATH set by CliTestHarness::new")
+            .unwrap_or_else(|| {
+                PathBuf::from(
+                    self.env
+                        .get("PI_CODING_AGENT_DIR")
+                        .expect("PI_CODING_AGENT_DIR must be set"),
+                )
+                .join("settings.json")
+            })
     }
 
     #[cfg(unix)]
@@ -1059,7 +1066,8 @@ fn e2e_cli_config_show_reports_empty_packages_when_none_configured() {
 
 #[test]
 fn e2e_cli_config_show_lists_discovered_package_resources() {
-    let harness = CliTestHarness::new("e2e_cli_config_show_lists_discovered_package_resources");
+    let mut harness = CliTestHarness::new("e2e_cli_config_show_lists_discovered_package_resources");
+    harness.env.remove("PI_CONFIG_PATH");
 
     let package_root = harness.harness.create_dir("config-ui-pkg");
     fs::create_dir_all(package_root.join("extensions")).expect("create package extensions");
@@ -1357,7 +1365,8 @@ fn e2e_cli_list_subcommand_works_offline() {
 #[cfg(unix)]
 #[test]
 fn e2e_cli_packages_install_list_remove_offline() {
-    let harness = CliTestHarness::new("e2e_cli_packages_install_list_remove_offline");
+    let mut harness = CliTestHarness::new("e2e_cli_packages_install_list_remove_offline");
+    harness.env.remove("PI_CONFIG_PATH");
 
     harness.harness.section("install local (project)");
     harness.harness.create_dir("local-pkg");
@@ -1464,7 +1473,8 @@ fn e2e_cli_packages_install_list_remove_offline() {
 #[cfg(unix)]
 #[test]
 fn e2e_cli_packages_update_respects_pinning_offline() {
-    let harness = CliTestHarness::new("e2e_cli_packages_update_respects_pinning_offline");
+    let mut harness = CliTestHarness::new("e2e_cli_packages_update_respects_pinning_offline");
+    harness.env.remove("PI_CONFIG_PATH");
 
     let git = |cwd: &Path, args: &[&str]| -> String {
         let output = Command::new("git")

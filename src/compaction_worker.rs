@@ -339,7 +339,11 @@ mod tests {
             inject_pending(&mut w, pending);
 
             drop(w);
-            asupersync::time::sleep(asupersync::time::wall_now(), std::time::Duration::from_millis(50)).await;
+            asupersync::time::sleep(
+                asupersync::time::wall_now(),
+                std::time::Duration::from_millis(50),
+            )
+            .await;
 
             assert!(
                 aborted.load(Ordering::SeqCst),
@@ -368,7 +372,11 @@ mod tests {
             let err_msg = outcome.unwrap_err().to_string();
             assert!(err_msg.contains("timed out"), "got: {err_msg}");
 
-            asupersync::time::sleep(asupersync::time::wall_now(), std::time::Duration::from_millis(50)).await;
+            asupersync::time::sleep(
+                asupersync::time::wall_now(),
+                std::time::Duration::from_millis(50),
+            )
+            .await;
             assert!(
                 aborted.load(Ordering::SeqCst),
                 "timing out the worker should abort the pending task"
@@ -393,7 +401,11 @@ mod tests {
             };
             let pending = ready_pending_with_handle(runtime_handle, Ok(result)).await;
             inject_pending(&mut w, pending);
-            asupersync::time::sleep(asupersync::time::wall_now(), std::time::Duration::from_millis(50)).await;
+            asupersync::time::sleep(
+                asupersync::time::wall_now(),
+                std::time::Duration::from_millis(50),
+            )
+            .await;
 
             let outcome = w.try_recv().await.expect("should have result");
             let result = outcome.expect("should be Ok");

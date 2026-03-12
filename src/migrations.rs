@@ -130,6 +130,7 @@ fn migrate_auth_to_auth_json(agent_dir: &Path, warnings: &mut Vec<String>) -> Ve
     let mut migrated = Map::new();
     let mut providers = BTreeSet::new();
     let mut parsed_oauth = false;
+    let mut oauth_has_unmigrated_entries = false;
 
     if oauth_path.exists() {
         match fs::read_to_string(&oauth_path) {
@@ -141,6 +142,11 @@ fn migrate_auth_to_auth_json(agent_dir: &Path, warnings: &mut Vec<String>) -> Ve
                             object.insert("type".to_string(), Value::String("oauth".to_string()));
                             migrated.insert(provider.clone(), Value::Object(object));
                             providers.insert(provider);
+                        } else {
+                            oauth_has_unmigrated_entries = true;
+                            warnings.push(format!(
+                                "oauth.json entry for provider {provider} is not an object; leaving oauth.json in place"
+                            ));
                         }
                     }
                 }
@@ -158,59 +164,73 @@ fn migrate_auth_to_auth_json(agent_dir: &Path, warnings: &mut Vec<String>) -> Ve
 
     if settings_path.exists() {
         match fs::read_to_string(&settings_path) {
-            Ok(content) => {
-                match serde_json::from_str::<Value>(&content) {
-                    Ok(mut settings_value) => {
-                        if let Some(api_keys) = settings_value
-                            .get("apiKeys")
-                            .and_then(Value::as_object)
-                            .cloned()
-                        {
-                            for (provider, key_value) in api_keys {
-                                let Some(key) = key_value.as_str() else {
-                                    continue;
-                                };
-                                if migrated.contains_key(&provider) {
-                                    continue;
-                                }
-                                migrated.insert(
-                                    provider.clone(),
-                                    serde_json::json!({
-                                        "type": "api_key",
-                                        "key": key,
-                                    }),
-                                );
-                                providers.insert(provider);
+            Ok(content) => match serde_json::from_str::<Value>(&content) {
+                Ok(mut settings_value) => {
+                    if let Some(api_keys) = settings_value
+                        .get("apiKeys")
+                        .and_then(Value::as_object)
+                        .cloned()
+                    {
+                        let mut remaining_api_keys = Map::new();
+                        let mut settings_changed = false;
+                        for (provider, key_value) in api_keys {
+                            let Some(key) = key_value.as_str() else {
+                                warnings.push(format!(
+                                        "settings.json apiKeys.{provider} is not a string; leaving it in place"
+                                    ));
+                                remaining_api_keys.insert(provider, key_value);
+                                continue;
+                            };
+                            settings_changed = true;
+                            if migrated.contains_key(&provider) {
+                                continue;
                             }
+                            migrated.insert(
+                                provider.clone(),
+                                serde_json::json!({
+                                    "type": "api_key",
+                                    "key": key,
+                                }),
+                            );
+                            providers.insert(provider);
+                        }
+                        if settings_changed {
                             if let Value::Object(settings_obj) = &mut settings_value {
-                                settings_obj.remove("apiKeys");
+                                if remaining_api_keys.is_empty() {
+                                    settings_obj.remove("apiKeys");
+                                } else {
+                                    settings_obj.insert(
+                                        "apiKeys".to_string(),
+                                        Value::Object(remaining_api_keys),
+                                    );
+                                }
                             }
                             match serde_json::to_string_pretty(&settings_value) {
-                            Ok(updated) => {
-                                let tmp = settings_path.with_extension("json.tmp");
-                                let res = fs::File::create(&tmp).and_then(|mut f| {
-                                    use std::io::Write;
-                                    f.write_all(updated.as_bytes())?;
-                                    f.sync_all()
-                                }).and_then(|()| fs::rename(&tmp, &settings_path));
+                                    Ok(updated) => {
+                                        let tmp = settings_path.with_extension("json.tmp");
+                                        let res = fs::File::create(&tmp).and_then(|mut f| {
+                                            use std::io::Write;
+                                            f.write_all(updated.as_bytes())?;
+                                            f.sync_all()
+                                        }).and_then(|()| fs::rename(&tmp, &settings_path));
 
-                                if let Err(err) = res {
-                                    warnings.push(format!(
-                                        "could not persist settings.json after apiKeys migration: {err}"
-                                    ));
+                                        if let Err(err) = res {
+                                            warnings.push(format!(
+                                                "could not persist settings.json after apiKeys migration: {err}"
+                                            ));
+                                        }
+                                    }
+                                    Err(err) => warnings.push(format!(
+                                        "could not serialize settings.json after apiKeys migration: {err}"
+                                    )),
                                 }
-                            }
-                            Err(err) => warnings.push(format!(
-                                "could not serialize settings.json after apiKeys migration: {err}"
-                            )),
-                        }
                         }
                     }
-                    Err(err) => warnings.push(format!(
-                        "could not parse settings.json for apiKeys migration: {err}"
-                    )),
                 }
-            }
+                Err(err) => warnings.push(format!(
+                    "could not parse settings.json for apiKeys migration: {err}"
+                )),
+            },
             Err(err) => warnings.push(format!(
                 "could not read settings.json for apiKeys migration: {err}"
             )),
@@ -258,7 +278,7 @@ fn migrate_auth_to_auth_json(agent_dir: &Path, warnings: &mut Vec<String>) -> Ve
         }
     }
 
-    if parsed_oauth && auth_persisted && oauth_path.exists() {
+    if parsed_oauth && !oauth_has_unmigrated_entries && auth_persisted && oauth_path.exists() {
         let migrated_path = oauth_path.with_extension("json.migrated");
         if let Err(err) = fs::rename(&oauth_path, migrated_path) {
             warnings.push(format!(
@@ -506,6 +526,74 @@ mod tests {
         .expect("parse settings");
         assert!(settings_value.get("apiKeys").is_none());
         assert!(agent_dir.join("oauth.json.migrated").exists());
+    }
+
+    #[test]
+    fn migrate_auth_preserves_malformed_oauth_entries() {
+        let temp = TempDir::new().expect("tempdir");
+        let agent_dir = temp.path().join("agent");
+        let cwd = temp.path().join("project");
+        fs::create_dir_all(&agent_dir).expect("create agent dir");
+        fs::create_dir_all(&cwd).expect("create cwd");
+
+        write(
+            &agent_dir.join("oauth.json"),
+            r#"{"anthropic":{"access_token":"a","refresh_token":"r","expires":1},"broken":"oops"}"#,
+        );
+
+        let report = run_startup_migrations_with_agent_dir(&agent_dir, &cwd);
+        assert_eq!(
+            report.migrated_auth_providers,
+            vec!["anthropic".to_string()]
+        );
+        assert!(report.warnings.iter().any(|warning| {
+            warning.contains("oauth.json entry for provider broken is not an object")
+        }));
+
+        let auth_value: Value = serde_json::from_str(
+            &fs::read_to_string(agent_dir.join("auth.json")).expect("read auth"),
+        )
+        .expect("parse auth");
+        assert_eq!(auth_value["anthropic"]["type"], "oauth");
+        assert!(agent_dir.join("oauth.json").exists());
+        assert!(!agent_dir.join("oauth.json.migrated").exists());
+    }
+
+    #[test]
+    fn migrate_auth_preserves_invalid_settings_api_keys() {
+        let temp = TempDir::new().expect("tempdir");
+        let agent_dir = temp.path().join("agent");
+        let cwd = temp.path().join("project");
+        fs::create_dir_all(&agent_dir).expect("create agent dir");
+        fs::create_dir_all(&cwd).expect("create cwd");
+
+        write(
+            &agent_dir.join("settings.json"),
+            r#"{"apiKeys":{"openai":"sk-openai","broken":123},"theme":"dark"}"#,
+        );
+
+        let report = run_startup_migrations_with_agent_dir(&agent_dir, &cwd);
+        assert_eq!(report.migrated_auth_providers, vec!["openai".to_string()]);
+        assert!(
+            report.warnings.iter().any(|warning| {
+                warning.contains("settings.json apiKeys.broken is not a string")
+            })
+        );
+
+        let auth_value: Value = serde_json::from_str(
+            &fs::read_to_string(agent_dir.join("auth.json")).expect("read auth"),
+        )
+        .expect("parse auth");
+        assert_eq!(auth_value["openai"]["type"], "api_key");
+        assert_eq!(auth_value["openai"]["key"], "sk-openai");
+
+        let settings_value: Value = serde_json::from_str(
+            &fs::read_to_string(agent_dir.join("settings.json")).expect("read settings"),
+        )
+        .expect("parse settings");
+        assert_eq!(settings_value["theme"], "dark");
+        assert_eq!(settings_value["apiKeys"]["broken"], 123);
+        assert!(settings_value["apiKeys"].get("openai").is_none());
     }
 
     #[cfg(unix)]

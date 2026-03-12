@@ -5278,9 +5278,9 @@ fn tui_grad_branch_picker_enter_while_agent_busy_keeps_picker_open() {
     let harness =
         TestHarness::new("tui_grad_branch_picker_enter_while_agent_busy_keeps_picker_open");
     let (session, _, _, _) = create_two_branch_session();
-    let extension_source = r#"
+    let extension_source = r"
 export default function init(pi) {}
-"#;
+";
     let (mut app, _rx) = build_app_with_session_and_events_and_extension(
         &harness,
         Vec::new(),

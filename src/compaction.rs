@@ -294,7 +294,7 @@ fn estimate_context_tokens(messages: &[SessionMessage]) -> ContextUsageEstimate 
     };
 
     let usage_tokens = calculate_context_tokens(usage);
-    
+
     // Fall back to heuristic estimation if the provider didn't return usage metrics
     if usage_tokens == 0 {
         let total = messages.iter().map(estimate_tokens).sum();
@@ -1343,6 +1343,21 @@ mod tests {
         let messages = vec![make_user_text("hello"), make_user_text("world")];
         let estimate = estimate_context_tokens(&messages);
         // No assistant messages, so sum estimate_tokens for all: ceil(5/3)+ceil(5/3) = 2+2 = 4
+        assert_eq!(estimate.tokens, 4);
+        assert!(estimate.last_usage_index.is_none());
+    }
+
+    #[test]
+    fn estimate_context_zero_usage_falls_back_to_heuristics() {
+        let messages = vec![
+            make_user_text("hi"),
+            make_assistant_text("hello", 0, 0),
+            make_user_text("bye"),
+        ];
+        let estimate = estimate_context_tokens(&messages);
+        // Zero provider usage should not collapse the estimate to trailing
+        // messages only. We should fall back to whole-history heuristics:
+        // "hi" => 1, "hello" => 2, "bye" => 1.
         assert_eq!(estimate.tokens, 4);
         assert!(estimate.last_usage_index.is_none());
     }
