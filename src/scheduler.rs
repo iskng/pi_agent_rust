@@ -906,8 +906,19 @@ impl ReactorMesh {
     #[must_use]
     #[allow(clippy::needless_pass_by_value)]
     pub fn new(config: ReactorMeshConfig) -> Self {
-        let shard_count = config.shard_count.max(1);
-        let lane_capacity = config.lane_capacity.max(1);
+        if config.shard_count == 0 || config.lane_capacity == 0 {
+            return Self {
+                seq: Seq::zero(),
+                lanes: Vec::new(),
+                shard_seq: Vec::new(),
+                rr_cursor: 0,
+                rejected_enqueues: 0,
+                placement_manifest: ReactorPlacementManifest::plan(0, config.topology.as_ref()),
+            };
+        }
+
+        let shard_count = config.shard_count;
+        let lane_capacity = config.lane_capacity;
         let placement_manifest =
             ReactorPlacementManifest::plan(shard_count, config.topology.as_ref());
         let lanes = (0..shard_count)
@@ -3890,6 +3901,54 @@ mod tests {
             .unwrap();
         let drained = mesh.drain_shard(99, 10);
         assert!(drained.is_empty());
+    }
+
+    #[test]
+    fn reactor_mesh_zero_shards_is_empty_and_rejects_enqueues() {
+        let mut mesh = ReactorMesh::new(ReactorMeshConfig {
+            shard_count: 0,
+            lane_capacity: 16,
+            topology: None,
+        });
+
+        assert_eq!(mesh.shard_count(), 0);
+        assert_eq!(mesh.total_depth(), 0);
+        assert!(!mesh.has_pending());
+        assert_eq!(mesh.queue_depth(0), None);
+        assert!(mesh.telemetry().queue_depths.is_empty());
+
+        let err = mesh
+            .enqueue_event("evt".to_string(), serde_json::json!(null))
+            .expect_err("empty mesh should reject enqueues");
+        assert_eq!(err.shard_id, 0);
+        assert_eq!(err.depth, 0);
+        assert_eq!(err.capacity, 0);
+        assert_eq!(mesh.telemetry().rejected_enqueues, 1);
+    }
+
+    #[test]
+    fn reactor_mesh_zero_capacity_is_empty_and_rejects_enqueues() {
+        let mut mesh = ReactorMesh::new(ReactorMeshConfig {
+            shard_count: 4,
+            lane_capacity: 0,
+            topology: None,
+        });
+
+        assert_eq!(mesh.shard_count(), 0);
+        assert_eq!(mesh.total_depth(), 0);
+        assert!(!mesh.has_pending());
+        assert_eq!(mesh.telemetry().queue_depths, Vec::<usize>::new());
+
+        let err = mesh
+            .enqueue_hostcall_complete(
+                "call".to_string(),
+                HostcallOutcome::Success(serde_json::json!({"ok": true})),
+            )
+            .expect_err("empty mesh should reject hostcall completions");
+        assert_eq!(err.shard_id, 0);
+        assert_eq!(err.depth, 0);
+        assert_eq!(err.capacity, 0);
+        assert_eq!(mesh.telemetry().rejected_enqueues, 1);
     }
 
     #[test]

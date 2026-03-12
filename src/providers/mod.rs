@@ -1016,19 +1016,19 @@ pub fn normalize_anthropic_base(base_url: &str) -> String {
     let mut base_for_fallback = trimmed.trim_end_matches('/').to_string();
 
     if let Ok(url) = Url::parse(trimmed) {
-        if !url.cannot_be_a_base() {
+        if url.cannot_be_a_base() {
+            base_for_fallback = url.as_str().trim_end_matches('/').to_string();
+        } else {
             if trimmed_url_path(&url).ends_with("/v1/messages") {
                 return canonicalize_url_path(&url);
             }
             return append_url_path(&url, "v1/messages");
-        } else {
-            base_for_fallback = url.as_str().trim_end_matches('/').to_string();
         }
     }
 
     let base_url = base_for_fallback;
     if base_url.ends_with("/v1/messages") {
-        return base_url.to_string();
+        return base_url;
     }
     format!("{base_url}/v1/messages")
 }
@@ -1088,7 +1088,9 @@ pub fn normalize_openai_base(base_url: &str) -> String {
     let mut base_for_fallback = trimmed.trim_end_matches('/').to_string();
 
     if let Ok(url) = Url::parse(trimmed) {
-        if !url.cannot_be_a_base() {
+        if url.cannot_be_a_base() {
+            base_for_fallback = url.as_str().trim_end_matches('/').to_string();
+        } else {
             if trimmed_url_path(&url).ends_with("/chat/completions") {
                 return canonicalize_url_path(&url);
             }
@@ -1097,14 +1099,12 @@ pub fn normalize_openai_base(base_url: &str) -> String {
                 return replace_url_path(&url, "/v1/chat/completions");
             }
             return append_url_path(&url, "chat/completions");
-        } else {
-            base_for_fallback = url.as_str().trim_end_matches('/').to_string();
         }
     }
 
     let base_url = base_for_fallback;
     if base_url.ends_with("/chat/completions") {
-        return base_url.to_string();
+        return base_url;
     }
     let base_url = base_url.strip_suffix("/responses").unwrap_or(&base_url);
     format!("{base_url}/chat/completions")
@@ -1119,7 +1119,9 @@ pub fn normalize_openai_responses_base(base_url: &str) -> String {
     let mut base_for_fallback = trimmed.trim_end_matches('/').to_string();
 
     if let Ok(url) = Url::parse(trimmed) {
-        if !url.cannot_be_a_base() {
+        if url.cannot_be_a_base() {
+            base_for_fallback = url.as_str().trim_end_matches('/').to_string();
+        } else {
             if trimmed_url_path(&url).ends_with("/responses") {
                 return canonicalize_url_path(&url);
             }
@@ -1128,14 +1130,12 @@ pub fn normalize_openai_responses_base(base_url: &str) -> String {
                 return replace_url_path(&url, "/v1/responses");
             }
             return append_url_path(&url, "responses");
-        } else {
-            base_for_fallback = url.as_str().trim_end_matches('/').to_string();
         }
     }
 
     let base_url = base_for_fallback;
     if base_url.ends_with("/responses") {
-        return base_url.to_string();
+        return base_url;
     }
     let base_url = base_url
         .strip_suffix("/chat/completions")
@@ -1152,7 +1152,9 @@ pub fn normalize_openai_codex_responses_base(base_url: &str) -> String {
     let mut base_for_fallback = trimmed.trim_end_matches('/').to_string();
 
     if let Ok(url) = Url::parse(trimmed) {
-        if !url.cannot_be_a_base() {
+        if url.cannot_be_a_base() {
+            base_for_fallback = url.as_str().trim_end_matches('/').to_string();
+        } else {
             let path = trimmed_url_path(&url);
             if path.ends_with("/backend-api/codex/responses") || path.ends_with("/responses") {
                 return canonicalize_url_path(&url);
@@ -1161,14 +1163,12 @@ pub fn normalize_openai_codex_responses_base(base_url: &str) -> String {
                 return append_url_path(&url, "codex/responses");
             }
             return append_url_path(&url, "backend-api/codex/responses");
-        } else {
-            base_for_fallback = url.as_str().trim_end_matches('/').to_string();
         }
     }
 
     let base = base_for_fallback;
     if base.ends_with("/backend-api/codex/responses") {
-        return base.to_string();
+        return base;
     }
     // Some registries (including legacy Pi) store the ChatGPT base as
     // `https://chatgpt.com/backend-api`. In that case we only want to append
@@ -1177,7 +1177,7 @@ pub fn normalize_openai_codex_responses_base(base_url: &str) -> String {
         return format!("{base}/codex/responses");
     }
     if base.ends_with("/responses") {
-        return base.to_string();
+        return base;
     }
     format!("{base}/backend-api/codex/responses")
 }
@@ -1191,7 +1191,9 @@ pub fn normalize_cohere_base(base_url: &str) -> String {
     let mut base_for_fallback = trimmed.trim_end_matches('/').to_string();
 
     if let Ok(url) = Url::parse(trimmed) {
-        if !url.cannot_be_a_base() {
+        if url.cannot_be_a_base() {
+            base_for_fallback = url.as_str().trim_end_matches('/').to_string();
+        } else {
             if trimmed_url_path(&url).ends_with("/chat") {
                 return canonicalize_url_path(&url);
             }
@@ -1199,14 +1201,12 @@ pub fn normalize_cohere_base(base_url: &str) -> String {
                 return replace_url_path(&url, "/v2/chat");
             }
             return append_url_path(&url, "chat");
-        } else {
-            base_for_fallback = url.as_str().trim_end_matches('/').to_string();
         }
     }
 
     let base_url = base_for_fallback;
     if base_url.ends_with("/chat") {
-        return base_url.to_string();
+        return base_url;
     }
     format!("{base_url}/chat")
 }

@@ -12089,8 +12089,26 @@ impl HostcallReactorMesh {
     #[must_use]
     #[allow(clippy::option_if_let_else)]
     pub fn new(config: HostcallReactorConfig) -> Self {
-        let shard_count = config.shard_count.max(1);
-        let lane_capacity = config.lane_capacity.max(1);
+        if config.shard_count == 0 || config.lane_capacity == 0 {
+            return Self {
+                config: HostcallReactorConfig {
+                    shard_count: 0,
+                    lane_capacity: 0,
+                    core_ids: None,
+                },
+                lanes: Vec::new(),
+                shard_seq: Vec::new(),
+                global_seq: 0,
+                rr_cursor: 0,
+                rejected_enqueues: 0,
+                total_dispatched: 0,
+                numa_pool: None,
+                affinity_advice: Vec::new(),
+            };
+        }
+
+        let shard_count = config.shard_count;
+        let lane_capacity = config.lane_capacity;
         let lanes = (0..shard_count)
             .map(|_| HostcallSpscLane::new(lane_capacity))
             .collect();
@@ -40534,6 +40552,60 @@ mod tests {
         assert_eq!(telemetry.rejected_enqueues, 1);
 
         manager.disable_hostcall_reactor();
+    }
+
+    #[test]
+    fn reactor_mesh_zero_shards_fail_closed() {
+        let mut mesh = HostcallReactorMesh::new(HostcallReactorConfig {
+            shard_count: 0,
+            lane_capacity: 64,
+            core_ids: Some(vec![0, 2]),
+        });
+
+        assert_eq!(mesh.shard_count(), 0);
+        assert_eq!(mesh.total_depth(), 0);
+        assert!(!mesh.has_pending());
+        assert_eq!(mesh.core_id_for_shard(0), None);
+        assert_eq!(mesh.telemetry().queue_depths, Vec::<usize>::new());
+
+        let err = mesh
+            .submit(
+                "zero-shards".to_string(),
+                CommonHostcallOpcode::SessionGetState,
+                json!({}),
+            )
+            .expect_err("zero-shard config should reject submissions");
+        assert_eq!(err.shard_id, 0);
+        assert_eq!(err.depth, 0);
+        assert_eq!(err.capacity, 0);
+        assert_eq!(mesh.telemetry().rejected_enqueues, 1);
+    }
+
+    #[test]
+    fn reactor_mesh_zero_capacity_fail_closed() {
+        let mut mesh = HostcallReactorMesh::new(HostcallReactorConfig {
+            shard_count: 4,
+            lane_capacity: 0,
+            core_ids: None,
+        });
+
+        assert_eq!(mesh.shard_count(), 0);
+        assert_eq!(mesh.total_depth(), 0);
+        assert!(!mesh.has_pending());
+        assert_eq!(mesh.telemetry().shard_count, 0);
+        assert_eq!(mesh.telemetry().queue_depths, Vec::<usize>::new());
+
+        let err = mesh
+            .submit(
+                "zero-capacity".to_string(),
+                CommonHostcallOpcode::EventsEmit,
+                json!({"event": "noop"}),
+            )
+            .expect_err("zero-capacity config should reject submissions");
+        assert_eq!(err.shard_id, 0);
+        assert_eq!(err.depth, 0);
+        assert_eq!(err.capacity, 0);
+        assert_eq!(mesh.telemetry().rejected_enqueues, 1);
     }
 
     fn typed_tool_read_payload(call_id: &str, path: &str) -> HostCallPayload {
