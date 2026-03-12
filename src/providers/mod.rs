@@ -1013,14 +1013,20 @@ pub fn normalize_anthropic_base(base_url: &str) -> String {
         return "https://api.anthropic.com/v1/messages".to_string();
     }
 
+    let mut base_for_fallback = trimmed.trim_end_matches('/').to_string();
+
     if let Ok(url) = Url::parse(trimmed) {
-        if trimmed_url_path(&url).ends_with("/v1/messages") {
-            return canonicalize_url_path(&url);
+        if !url.cannot_be_a_base() {
+            if trimmed_url_path(&url).ends_with("/v1/messages") {
+                return canonicalize_url_path(&url);
+            }
+            return append_url_path(&url, "v1/messages");
+        } else {
+            base_for_fallback = url.as_str().trim_end_matches('/').to_string();
         }
-        return append_url_path(&url, "v1/messages");
     }
 
-    let base_url = trimmed.trim_end_matches('/');
+    let base_url = base_for_fallback;
     if base_url.ends_with("/v1/messages") {
         return base_url.to_string();
     }
@@ -1079,22 +1085,28 @@ pub fn normalize_openai_base(base_url: &str) -> String {
         return "https://api.openai.com/v1/chat/completions".to_string();
     }
 
+    let mut base_for_fallback = trimmed.trim_end_matches('/').to_string();
+
     if let Ok(url) = Url::parse(trimmed) {
-        if trimmed_url_path(&url).ends_with("/chat/completions") {
-            return canonicalize_url_path(&url);
+        if !url.cannot_be_a_base() {
+            if trimmed_url_path(&url).ends_with("/chat/completions") {
+                return canonicalize_url_path(&url);
+            }
+            let url = strip_url_path_suffix(&url, "/responses").unwrap_or(url);
+            if is_official_https_origin(&url, "api.openai.com", 443) {
+                return replace_url_path(&url, "/v1/chat/completions");
+            }
+            return append_url_path(&url, "chat/completions");
+        } else {
+            base_for_fallback = url.as_str().trim_end_matches('/').to_string();
         }
-        let url = strip_url_path_suffix(&url, "/responses").unwrap_or(url);
-        if is_official_https_origin(&url, "api.openai.com", 443) {
-            return replace_url_path(&url, "/v1/chat/completions");
-        }
-        return append_url_path(&url, "chat/completions");
     }
 
-    let base_url = trimmed.trim_end_matches('/');
+    let base_url = base_for_fallback;
     if base_url.ends_with("/chat/completions") {
         return base_url.to_string();
     }
-    let base_url = base_url.strip_suffix("/responses").unwrap_or(base_url);
+    let base_url = base_url.strip_suffix("/responses").unwrap_or(&base_url);
     format!("{base_url}/chat/completions")
 }
 
@@ -1104,24 +1116,30 @@ pub fn normalize_openai_responses_base(base_url: &str) -> String {
         return "https://api.openai.com/v1/responses".to_string();
     }
 
+    let mut base_for_fallback = trimmed.trim_end_matches('/').to_string();
+
     if let Ok(url) = Url::parse(trimmed) {
-        if trimmed_url_path(&url).ends_with("/responses") {
-            return canonicalize_url_path(&url);
+        if !url.cannot_be_a_base() {
+            if trimmed_url_path(&url).ends_with("/responses") {
+                return canonicalize_url_path(&url);
+            }
+            let url = strip_url_path_suffix(&url, "/chat/completions").unwrap_or(url);
+            if is_official_https_origin(&url, "api.openai.com", 443) {
+                return replace_url_path(&url, "/v1/responses");
+            }
+            return append_url_path(&url, "responses");
+        } else {
+            base_for_fallback = url.as_str().trim_end_matches('/').to_string();
         }
-        let url = strip_url_path_suffix(&url, "/chat/completions").unwrap_or(url);
-        if is_official_https_origin(&url, "api.openai.com", 443) {
-            return replace_url_path(&url, "/v1/responses");
-        }
-        return append_url_path(&url, "responses");
     }
 
-    let base_url = trimmed.trim_end_matches('/');
+    let base_url = base_for_fallback;
     if base_url.ends_with("/responses") {
         return base_url.to_string();
     }
     let base_url = base_url
         .strip_suffix("/chat/completions")
-        .unwrap_or(base_url);
+        .unwrap_or(&base_url);
     format!("{base_url}/responses")
 }
 
@@ -1131,18 +1149,24 @@ pub fn normalize_openai_codex_responses_base(base_url: &str) -> String {
         return openai_responses::CODEX_RESPONSES_API_URL.to_string();
     }
 
+    let mut base_for_fallback = trimmed.trim_end_matches('/').to_string();
+
     if let Ok(url) = Url::parse(trimmed) {
-        let path = trimmed_url_path(&url);
-        if path.ends_with("/backend-api/codex/responses") || path.ends_with("/responses") {
-            return canonicalize_url_path(&url);
+        if !url.cannot_be_a_base() {
+            let path = trimmed_url_path(&url);
+            if path.ends_with("/backend-api/codex/responses") || path.ends_with("/responses") {
+                return canonicalize_url_path(&url);
+            }
+            if path.ends_with("/backend-api") {
+                return append_url_path(&url, "codex/responses");
+            }
+            return append_url_path(&url, "backend-api/codex/responses");
+        } else {
+            base_for_fallback = url.as_str().trim_end_matches('/').to_string();
         }
-        if path.ends_with("/backend-api") {
-            return append_url_path(&url, "codex/responses");
-        }
-        return append_url_path(&url, "backend-api/codex/responses");
     }
 
-    let base = trimmed.trim_end_matches('/');
+    let base = base_for_fallback;
     if base.ends_with("/backend-api/codex/responses") {
         return base.to_string();
     }
@@ -1164,17 +1188,23 @@ pub fn normalize_cohere_base(base_url: &str) -> String {
         return "https://api.cohere.com/v2/chat".to_string();
     }
 
+    let mut base_for_fallback = trimmed.trim_end_matches('/').to_string();
+
     if let Ok(url) = Url::parse(trimmed) {
-        if trimmed_url_path(&url).ends_with("/chat") {
-            return canonicalize_url_path(&url);
+        if !url.cannot_be_a_base() {
+            if trimmed_url_path(&url).ends_with("/chat") {
+                return canonicalize_url_path(&url);
+            }
+            if is_official_https_origin(&url, "api.cohere.com", 443) {
+                return replace_url_path(&url, "/v2/chat");
+            }
+            return append_url_path(&url, "chat");
+        } else {
+            base_for_fallback = url.as_str().trim_end_matches('/').to_string();
         }
-        if is_official_https_origin(&url, "api.cohere.com", 443) {
-            return replace_url_path(&url, "/v2/chat");
-        }
-        return append_url_path(&url, "chat");
     }
 
-    let base_url = trimmed.trim_end_matches('/');
+    let base_url = base_for_fallback;
     if base_url.ends_with("/chat") {
         return base_url.to_string();
     }
