@@ -26355,12 +26355,26 @@ impl ExtensionManager {
     /// Fast-lane opcodes will be routed through per-shard SPSC lanes
     /// for reduced cross-core contention.
     pub fn enable_hostcall_reactor(&self, config: HostcallReactorConfig) {
+        let configured_shard_count = config.shard_count;
+        let lane_capacity = config.lane_capacity;
+        let reactor = HostcallReactorMesh::new(config);
+        let shard_count = reactor.shard_count();
         let mut guard = self
             .inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let shard_count = config.shard_count;
-        guard.hostcall_reactor = Some(HostcallReactorMesh::new(config));
+        if shard_count == 0 {
+            guard.hostcall_reactor = None;
+            drop(guard);
+            tracing::warn!(
+                event = "hostcall_reactor.invalid_config",
+                configured_shard_count = configured_shard_count,
+                lane_capacity = lane_capacity,
+                "Invalid hostcall reactor config leaves reactor disabled"
+            );
+            return;
+        }
+        guard.hostcall_reactor = Some(reactor);
         drop(guard);
         tracing::info!(
             event = "hostcall_reactor.enabled",
@@ -40552,6 +40566,66 @@ mod tests {
         assert_eq!(telemetry.rejected_enqueues, 1);
 
         manager.disable_hostcall_reactor();
+    }
+
+    #[test]
+    fn extension_manager_zero_shard_reactor_config_disables_mesh() {
+        let manager = ExtensionManager::new();
+        manager.enable_hostcall_reactor(HostcallReactorConfig {
+            shard_count: 1,
+            lane_capacity: 2,
+            core_ids: None,
+        });
+        assert!(manager.hostcall_reactor_enabled());
+
+        manager.enable_hostcall_reactor(HostcallReactorConfig {
+            shard_count: 0,
+            lane_capacity: 64,
+            core_ids: Some(vec![0, 2]),
+        });
+
+        assert!(!manager.hostcall_reactor_enabled());
+        assert!(
+            manager
+                .reactor_submit(
+                    "zero-shard-manager".to_string(),
+                    CommonHostcallOpcode::SessionGetState,
+                    json!({}),
+                )
+                .is_none()
+        );
+        assert!(manager.reactor_telemetry().is_none());
+        assert!(manager.reactor_drain_global(4).is_empty());
+    }
+
+    #[test]
+    fn extension_manager_zero_capacity_reactor_config_disables_mesh() {
+        let manager = ExtensionManager::new();
+        manager.enable_hostcall_reactor(HostcallReactorConfig {
+            shard_count: 2,
+            lane_capacity: 2,
+            core_ids: None,
+        });
+        assert!(manager.hostcall_reactor_enabled());
+
+        manager.enable_hostcall_reactor(HostcallReactorConfig {
+            shard_count: 4,
+            lane_capacity: 0,
+            core_ids: None,
+        });
+
+        assert!(!manager.hostcall_reactor_enabled());
+        assert!(
+            manager
+                .reactor_submit(
+                    "zero-capacity-manager".to_string(),
+                    CommonHostcallOpcode::EventsEmit,
+                    json!({"event": "noop"}),
+                )
+                .is_none()
+        );
+        assert!(manager.reactor_telemetry().is_none());
+        assert!(manager.reactor_drain_global(4).is_empty());
     }
 
     #[test]
