@@ -389,7 +389,7 @@ impl AutocompleteProvider {
 
             let is_dir = entry.file_type().is_some_and(|ty| ty.is_dir());
             if is_dir {
-                insert.push('/');
+                insert.push(separator);
             }
 
             let label = insert.clone();
@@ -2156,6 +2156,19 @@ mod tests {
 
         let resp = provider.suggest(".\\ma", ".\\ma".len());
         assert!(resp.items.iter().any(|i| i.insert == ".\\main.rs"));
+    }
+
+    #[test]
+    fn path_completion_windows_directory_input_preserves_backslashes_for_directories() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(tmp.path().join("src").join("nested")).expect("mkdir");
+
+        let mut provider =
+            AutocompleteProvider::new(tmp.path().to_path_buf(), AutocompleteCatalog::default());
+
+        let resp = provider.suggest("src\\n", "src\\n".len());
+        assert!(resp.items.iter().any(|i| i.insert == "src\\nested\\"));
+        assert!(!resp.items.iter().any(|i| i.insert == "src\\nested/"));
     }
 
     // ── FileCache invalidation ───────────────────────────────────────
