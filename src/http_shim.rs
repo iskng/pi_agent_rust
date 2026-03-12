@@ -73,11 +73,12 @@ function __pi_http_chunks_to_base64(chunks) {
   }
 
   let binary = '';
-  for (let i = 0; i < merged.length; i++) {
-    binary += String.fromCharCode(merged[i]);
+  const CHUNK_SIZE = 8192;
+  for (let i = 0; i < merged.length; i += CHUNK_SIZE) {
+    binary += String.fromCharCode.apply(null, merged.subarray(i, i + CHUNK_SIZE));
   }
-  return globalThis.__pi_base64_encode_native(binary);
-}
+  return __pi_base64_encode_native(binary);
+  }
 
 function __pi_http_decode_body_bytes(bodyBytes) {
   const encoded = String(bodyBytes ?? '');
