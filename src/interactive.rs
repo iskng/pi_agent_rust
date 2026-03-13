@@ -699,6 +699,21 @@ impl PiApp {
             .unwrap_or(true)
     }
 
+    const fn default_permissive_changes_require_extension_restart(&self) -> bool {
+        self.extensions.is_some()
+    }
+
+    fn default_permissive_update_status(&self, next: bool) -> String {
+        let mut status = format!(
+            "Updated extensionPolicy.defaultPermissive: {}",
+            bool_label(next)
+        );
+        if self.default_permissive_changes_require_extension_restart() {
+            status.push_str(" (restart active extensions/session to apply)");
+        }
+        status
+    }
+
     fn apply_hardware_cursor(show: bool) {
         let mut stdout = std::io::stdout();
         if show {
@@ -725,10 +740,7 @@ impl PiApp {
                         .extension_policy
                         .get_or_insert_with(ExtensionPolicyConfig::default);
                     policy.default_permissive = Some(next);
-                    self.status_message = Some(format!(
-                        "Updated extensionPolicy.defaultPermissive: {}",
-                        bool_label(next)
-                    ));
+                    self.status_message = Some(self.default_permissive_update_status(next));
                 }
             }
             SettingsUiEntry::QuietStartup => {
@@ -957,8 +969,13 @@ impl PiApp {
         let _ = writeln!(output, "  followUpMode: {}", follow_up.as_str());
         let _ = writeln!(
             output,
-            "  extensionPolicy.defaultPermissive: {}",
-            bool_label(default_permissive)
+            "  extensionPolicy.defaultPermissive: {}{}",
+            bool_label(default_permissive),
+            if self.default_permissive_changes_require_extension_restart() {
+                " (future changes apply after extension restart)"
+            } else {
+                ""
+            }
         );
         let _ = writeln!(output, "  quietStartup: {}", bool_label(quiet_startup));
         let _ = writeln!(

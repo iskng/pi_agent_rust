@@ -53,6 +53,13 @@ fn test_runtime_handle() -> asupersync::runtime::RuntimeHandle {
 }
 
 fn build_test_app_with_config(config: Config) -> PiApp {
+    build_test_app_with_config_and_extensions(config, None)
+}
+
+fn build_test_app_with_config_and_extensions(
+    config: Config,
+    extensions: Option<crate::extensions::ExtensionManager>,
+) -> PiApp {
     let provider: Arc<dyn Provider> = Arc::new(DummyProvider);
     let agent = Agent::new(
         provider,
@@ -89,7 +96,7 @@ fn build_test_app_with_config(config: Config) -> PiApp {
         event_tx,
         test_runtime_handle(),
         false,
-        None,
+        extensions,
         Some(KeyBindings::new()),
         Vec::new(),
         Usage::default(),
@@ -808,6 +815,30 @@ fn apply_queue_modes_updates_injected_queue_delivery_policy() {
         queued_follow_ups, 2,
         "updated queue modes should apply to extension-injected messages too"
     );
+}
+
+#[test]
+fn default_permissive_status_mentions_restart_when_extensions_are_active() {
+    let app = build_test_app_with_config_and_extensions(
+        Config::default(),
+        Some(crate::extensions::ExtensionManager::new()),
+    );
+
+    let status = app.default_permissive_update_status(false);
+    assert!(status.contains("restart active extensions/session to apply"));
+}
+
+#[test]
+fn settings_summary_notes_restart_requirement_for_future_policy_changes() {
+    let app = build_test_app_with_config_and_extensions(
+        Config::default(),
+        Some(crate::extensions::ExtensionManager::new()),
+    );
+
+    let summary = app.format_settings_summary();
+    assert!(summary.contains(
+        "extensionPolicy.defaultPermissive: true (future changes apply after extension restart)"
+    ));
 }
 
 // --- push_line tests ---
