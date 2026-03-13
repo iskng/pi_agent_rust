@@ -688,7 +688,7 @@ fn body_kind_from_headers(headers: &[(String, String)]) -> Result<BodyKind> {
                     .split(',')
                     .map(str::trim)
                     .filter(|value| !value.is_empty())
-                    .map(|value| value.to_ascii_lowercase()),
+                    .map(str::to_ascii_lowercase),
             );
         }
     }
