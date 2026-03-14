@@ -4363,24 +4363,34 @@ pub fn migrate_dry_run(jsonl_path: &Path) -> Result<session_store_v2::MigrationV
     let tmp_v2_root = tmp_dir.path().join("dry_run.v2");
 
     // Parse JSONL and populate a temporary V2 store.
-    let contents =
-        std::fs::read_to_string(jsonl_path).map_err(|e| crate::Error::Io(Box::new(e)))?;
-    let mut lines = contents.lines();
-    let header_line = lines
-        .next()
-        .ok_or_else(|| crate::Error::session("Empty JSONL session file"))?;
-    let header: SessionHeader = serde_json::from_str(header_line)
+    let file = std::fs::File::open(jsonl_path).map_err(|e| crate::Error::Io(Box::new(e)))?;
+    let mut reader = std::io::BufReader::new(file);
+    use std::io::BufRead;
+
+    let mut header_line = String::new();
+    if reader.read_line(&mut header_line).map_err(|e| crate::Error::Io(Box::new(e)))? == 0 {
+        return Err(crate::Error::session("Empty JSONL session file"));
+    }
+
+    let header: SessionHeader = serde_json::from_str(header_line.trim_end())
         .map_err(|e| crate::Error::session(format!("Invalid header in JSONL: {e}")))?;
     header.validate().map_err(|reason| {
         crate::Error::session(format!("Invalid session header in JSONL: {reason}"))
     })?;
 
     let mut store = SessionStoreV2::create(&tmp_v2_root, 64 * 1024 * 1024)?;
-    for line in lines {
+    
+    let mut line = String::new();
+    loop {
+        line.clear();
+        let bytes_read = reader.read_line(&mut line).map_err(|e| crate::Error::Io(Box::new(e)))?;
+        if bytes_read == 0 {
+            break;
+        }
         if line.trim().is_empty() {
             continue;
         }
-        let entry: SessionEntry = serde_json::from_str(line)
+        let entry: SessionEntry = serde_json::from_str(line.trim_end())
             .map_err(|e| crate::Error::session(format!("Bad JSONL entry: {e}")))?;
         let (entry_id, parent_entry_id, entry_type, payload) =
             session_store_v2::session_entry_to_frame_args(&entry)?;
@@ -4422,13 +4432,25 @@ pub fn recover_partial_migration(
 }
 
 fn jsonl_has_entry_lines(jsonl_path: &Path) -> Result<bool> {
-    let contents =
-        std::fs::read_to_string(jsonl_path).map_err(|e| crate::Error::Io(Box::new(e)))?;
-    let mut lines = contents.lines();
-    if lines.next().is_none() {
+    let file = std::fs::File::open(jsonl_path).map_err(|e| crate::Error::Io(Box::new(e)))?;
+    let mut reader = std::io::BufReader::new(file);
+    use std::io::BufRead;
+    
+    let mut line = String::new();
+    if reader.read_line(&mut line).map_err(|e| crate::Error::Io(Box::new(e)))? == 0 {
         return Err(crate::Error::session("Empty JSONL session file"));
     }
-    Ok(lines.any(|line| !line.trim().is_empty()))
+    
+    loop {
+        line.clear();
+        let bytes_read = reader.read_line(&mut line).map_err(|e| crate::Error::Io(Box::new(e)))?;
+        if bytes_read == 0 {
+            return Ok(false);
+        }
+        if !line.trim().is_empty() {
+            return Ok(true);
+        }
+    }
 }
 
 /// Result of single-pass load finalization (Gap F).

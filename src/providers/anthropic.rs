@@ -191,39 +191,42 @@ fn kimi_device_id_paths() -> Option<(std::path::PathBuf, std::path::PathBuf)> {
 }
 
 fn kimi_device_id() -> String {
-    let generated = uuid::Uuid::new_v4().simple().to_string();
-    let Some((primary, legacy)) = kimi_device_id_paths() else {
-        return generated;
-    };
+    static DEVICE_ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    DEVICE_ID.get_or_init(|| {
+        let generated = uuid::Uuid::new_v4().simple().to_string();
+        let Some((primary, legacy)) = kimi_device_id_paths() else {
+            return generated;
+        };
 
-    for path in [&primary, &legacy] {
-        if let Ok(existing) = fs::read_to_string(path) {
-            let existing = existing.trim();
-            if !existing.is_empty() {
-                return existing.to_string();
+        for path in [&primary, &legacy] {
+            if let Ok(existing) = fs::read_to_string(path) {
+                let existing = existing.trim();
+                if !existing.is_empty() {
+                    return existing.to_string();
+                }
             }
         }
-    }
 
-    if let Some(parent) = primary.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
+        if let Some(parent) = primary.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
 
-    let mut options = fs::OpenOptions::new();
-    options.write(true).create_new(true);
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
 
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
 
-    if let Ok(mut file) = options.open(&primary) {
-        use std::io::Write;
-        let _ = file.write_all(generated.as_bytes());
-    }
+        if let Ok(mut file) = options.open(&primary) {
+            use std::io::Write;
+            let _ = file.write_all(generated.as_bytes());
+        }
 
-    generated
+        generated
+    }).clone()
 }
 
 fn kimi_common_headers() -> Vec<(String, String)> {
