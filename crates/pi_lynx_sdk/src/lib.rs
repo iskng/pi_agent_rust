@@ -32,8 +32,10 @@
 
 pub mod bootstrap;
 pub mod errors;
+pub mod event_bridge;
 pub mod history;
 pub mod provider_factory;
+pub mod runtime;
 pub mod tool_bridge;
 pub mod types;
 
@@ -42,6 +44,9 @@ pub use crate::errors::{EmbedError, EmbedErrorKind, Result};
 pub use crate::history::reconstruct_history;
 pub use crate::provider_factory::{
     ResolvedProvider, build_stream_options, resolve_model_entry, resolve_provider,
+};
+pub use crate::runtime::{
+    continue_turn, continue_turn_with_artifacts, run_turn, run_turn_with_artifacts,
 };
 pub use crate::tool_bridge::{
     HostToolAdapter, HostToolDefinition, HostToolError, HostToolErrorKind, HostToolOutput,

@@ -4138,6 +4138,7 @@ dependencies = [
  "asupersync",
  "async-trait",
  "base64",
+ "futures",
  "pi_agent_rust",
  "pretty_assertions",
  "serde",
