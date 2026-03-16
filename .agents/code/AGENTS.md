@@ -103,6 +103,7 @@ Benchmarks: tools, extensions, system, tui_perf.
 - **VCR tests fail**: Set VCR_MODE=playback VCR_CASSETTE_DIR=tests/fixtures/vcr
 - **Clippy blocks CI**: Fix all warnings; CI uses -D warnings
 - **Workspace default-members skip embed crates**: Validate `pi_lynx_sdk` with `-p pi_lynx_sdk` or `--workspace`, not bare `cargo check`
+- **Package clippy for embed crates**: Use `cargo clippy -p pi_lynx_sdk --all-targets --no-deps -- -D warnings` to avoid unrelated root-crate lints from the path dependency
 - **Extension JS errors**: QuickJS only — no Node/Bun APIs
 - **Session lock errors**: Another pi process may hold the fs4 exclusive lock
 

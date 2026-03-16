@@ -9,6 +9,7 @@ publish = false
 path = "src/lib.rs"
 
 [dependencies]
+async-trait = "0.1"
 base64 = "0.22"
 pi = { package = "pi_agent_rust", path = "../.." }
 serde = { version = "1", features = ["derive", "rc"] }
@@ -17,4 +18,5 @@ thiserror = "2"
 tracing = "0.1"
 
 [dev-dependencies]
+asupersync = { version = "=0.2.5", default-features = false }
 pretty_assertions = "1"

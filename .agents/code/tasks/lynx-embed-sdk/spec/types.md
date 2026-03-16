@@ -16,6 +16,7 @@ Fields:
 - `enable_extensions: bool`
 - `session_mode: SessionMode`
 - `tool_policy: ToolPolicy`
+- `host_tools: Vec<Arc<dyn HostToolAdapter>>`
 - `runtime_metadata: RuntimeMetadata`
 
 Notes:
@@ -99,6 +100,8 @@ Purpose:
 
 - keep tool exposure explicit and testable
 - prevent accidental use of Pi built-in mutating tools
+- pair policy with explicit host-owned adapter instances instead of any Pi
+  built-in tool registry
 
 ### `HostToolKind`
 
@@ -263,12 +266,13 @@ Normalized tool update payload for host forwarding.
 
 Fields:
 
-- `text: Option<String>`
+- `content: Vec<crate::model::ContentBlock>`
 - `details: Option<serde_json::Value>`
 
 Purpose:
 
-- give a stable schema for incremental host tool output
+- preserve richer incremental tool payloads without collapsing them to plain
+  text
 
 ## Internal Types
 
@@ -283,6 +287,7 @@ Fields:
 - `agent_config: crate::agent::AgentConfig`
 - `provider: Arc<dyn crate::provider::Provider>`
 - `history: Vec<crate::model::Message>`
+- `history_warnings: Vec<HistoryWarning>`
 
 Purpose:
 

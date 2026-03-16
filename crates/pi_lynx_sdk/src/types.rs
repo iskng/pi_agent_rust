@@ -1,6 +1,7 @@
 //! Shared embed-facing request, response, and transcript types.
 
 use crate::errors::EmbedErrorKind;
+use crate::tool_bridge::HostToolAdapter;
 use pi::model::ThinkingLevel;
 use pi::sdk::{
     AbortSignal, AssistantMessage, ContentBlock, Message, QueueMode, StopReason, StreamEvent, Usage,
@@ -30,6 +31,8 @@ pub struct LynxEmbedConfig {
     pub session_mode: SessionMode,
     /// Tool exposure policy enforced by the embed layer.
     pub tool_policy: ToolPolicy,
+    /// Host-routed tools available for embed execution.
+    pub host_tools: Vec<Arc<dyn HostToolAdapter>>,
     /// Opaque host metadata forwarded through runtime assembly.
     pub runtime_metadata: RuntimeMetadata,
 }
@@ -48,6 +51,7 @@ impl LynxEmbedConfig {
                 enable_extensions: false,
                 session_mode: SessionMode::InMemory,
                 tool_policy: ToolPolicy::default(),
+                host_tools: Vec::new(),
                 runtime_metadata: RuntimeMetadata::default(),
             },
         }
@@ -107,6 +111,23 @@ impl LynxEmbedConfigBuilder {
     #[must_use]
     pub fn tool_policy(mut self, tool_policy: ToolPolicy) -> Self {
         self.inner.tool_policy = tool_policy;
+        self
+    }
+
+    /// Replace the host-routed tool set.
+    #[must_use]
+    pub fn host_tools<I>(mut self, host_tools: I) -> Self
+    where
+        I: IntoIterator<Item = Arc<dyn HostToolAdapter>>,
+    {
+        self.inner.host_tools = host_tools.into_iter().collect();
+        self
+    }
+
+    /// Append a single host-routed tool adapter.
+    #[must_use]
+    pub fn push_host_tool(mut self, host_tool: Arc<dyn HostToolAdapter>) -> Self {
+        self.inner.host_tools.push(host_tool);
         self
     }
 
@@ -243,6 +264,26 @@ pub enum HostToolKind {
     Edit,
     /// Write files through host policy.
     Write,
+}
+
+impl HostToolKind {
+    /// Return whether the tool kind is safe to run in parallel.
+    #[must_use]
+    pub const fn is_read_only(self) -> bool {
+        matches!(self, Self::Read | Self::Search | Self::List)
+    }
+
+    /// Return whether the tool kind mutates workspace state.
+    #[must_use]
+    pub const fn is_mutating(self) -> bool {
+        matches!(self, Self::Edit | Self::Write)
+    }
+
+    /// Return whether the tool kind may execute subprocesses.
+    #[must_use]
+    pub const fn is_exec(self) -> bool {
+        matches!(self, Self::Exec)
+    }
 }
 
 /// Structured metadata passed through embed runtime assembly.
