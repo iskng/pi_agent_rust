@@ -104,6 +104,7 @@ Benchmarks: tools, extensions, system, tui_perf.
 - **Clippy blocks CI**: Fix all warnings; CI uses -D warnings
 - **Workspace default-members skip embed crates**: Validate `pi_lynx_sdk` with `-p pi_lynx_sdk` or `--workspace`, not bare `cargo check`
 - **Package clippy for embed crates**: Use `cargo clippy -p pi_lynx_sdk --all-targets --no-deps -- -D warnings` to avoid unrelated root-crate lints from the path dependency
+- **Fresh tmp target dirs can trip `tikv-jemalloc-sys` on this macOS host**: if `/data/tmp` is unavailable and a clean `/tmp` target build fails in jemalloc configure, rerun package validation with the default workspace target cache
 - **Extension JS errors**: QuickJS only — no Node/Bun APIs
 - **Session lock errors**: Another pi process may hold the fs4 exclusive lock
 

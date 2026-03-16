@@ -18,11 +18,13 @@ pub fn reconstruct_history(transcript: &[HostTranscriptEntry]) -> Result<History
     let mut messages = Vec::with_capacity(transcript.len());
     let mut warnings = Vec::new();
     let mut tool_calls = BTreeMap::<String, String>::new();
+    let mut pending_tool_calls = BTreeMap::<String, String>::new();
     let mut completed_tool_calls = BTreeSet::<String>::new();
 
     for entry in transcript {
         match entry.role {
             HostTranscriptRole::User => {
+                ensure_no_pending_tool_calls(entry, &pending_tool_calls)?;
                 let blocks = convert_blocks(entry, TranscriptRole::User, &mut warnings)?;
                 let content = match blocks.as_slice() {
                     [ContentBlock::Text(text)] => UserContent::Text(text.text.clone()),
@@ -34,6 +36,7 @@ pub fn reconstruct_history(transcript: &[HostTranscriptEntry]) -> Result<History
                 }));
             }
             HostTranscriptRole::Assistant => {
+                ensure_no_pending_tool_calls(entry, &pending_tool_calls)?;
                 let content = convert_blocks(entry, TranscriptRole::Assistant, &mut warnings)?;
                 for block in &content {
                     if let ContentBlock::ToolCall(tool_call) = block {
@@ -49,6 +52,7 @@ pub fn reconstruct_history(transcript: &[HostTranscriptEntry]) -> Result<History
                                 ),
                             ));
                         }
+                        pending_tool_calls.insert(tool_call.id.clone(), tool_call.name.clone());
                     }
                 }
 
@@ -90,12 +94,32 @@ pub fn reconstruct_history(transcript: &[HostTranscriptEntry]) -> Result<History
                         format!("tool result references unknown tool_call_id '{tool_call_id}'"),
                     ));
                 };
+                let Some(pending_name) = pending_tool_calls.remove(&tool_call_id) else {
+                    let message = if completed_tool_calls.contains(&tool_call_id) {
+                        format!("duplicate tool result for tool_call_id '{tool_call_id}'")
+                    } else {
+                        format!(
+                            "tool result for tool_call_id '{tool_call_id}' is out of order; \
+all assistant tool calls must be resolved before the next non-tool transcript entry"
+                        )
+                    };
+                    return Err(transcript_error(entry, message));
+                };
                 if expected_name != &tool_name {
                     return Err(transcript_error(
                         entry,
                         format!(
                             "tool result tool_name '{}' does not match assistant tool call '{}'",
                             tool_name, expected_name
+                        ),
+                    ));
+                }
+                if pending_name != tool_name {
+                    return Err(transcript_error(
+                        entry,
+                        format!(
+                            "tool result tool_name '{}' does not match pending assistant tool call '{}'",
+                            tool_name, pending_name
                         ),
                     ));
                 }
@@ -117,6 +141,7 @@ pub fn reconstruct_history(transcript: &[HostTranscriptEntry]) -> Result<History
                 }));
             }
             HostTranscriptRole::Custom => {
+                ensure_no_pending_tool_calls(entry, &pending_tool_calls)?;
                 let mut text_fragments = Vec::new();
                 for block in &entry.content {
                     match block {
@@ -148,6 +173,17 @@ pub fn reconstruct_history(transcript: &[HostTranscriptEntry]) -> Result<History
                 }));
             }
         }
+    }
+
+    if !pending_tool_calls.is_empty() {
+        let unresolved = pending_tool_calls
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(EmbedError::transcript(format!(
+            "transcript ended with unresolved assistant tool_call_id(s): {unresolved}"
+        )));
     }
 
     Ok(HistoryConversionResult { messages, warnings })
@@ -242,4 +278,26 @@ fn transcript_error(entry: &HostTranscriptEntry, message: impl Into<String>) -> 
         |message_id| format!("message_id {message_id}: {message}"),
     );
     EmbedError::transcript(context)
+}
+
+fn ensure_no_pending_tool_calls(
+    entry: &HostTranscriptEntry,
+    pending_tool_calls: &BTreeMap<String, String>,
+) -> Result<()> {
+    if pending_tool_calls.is_empty() {
+        return Ok(());
+    }
+
+    let unresolved = pending_tool_calls
+        .keys()
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(transcript_error(
+        entry,
+        format!(
+            "encountered {:?} transcript entry while assistant tool_call_id(s) remain unresolved: {unresolved}",
+            entry.role
+        ),
+    ))
 }

@@ -10,8 +10,9 @@ use pi::sdk::{AssistantMessage, ToolCall, Usage, UserContent, UserMessage};
 use pi_lynx_sdk::{
     BootstrapArtifacts, ContinueTurnRequest, EmbedErrorKind, EmbedEvent, HostToolAdapter,
     HostToolDefinition, HostToolError, HostToolKind, HostToolOutput, HostToolRequest,
-    LynxEmbedConfig, ProviderSelection, RuntimeMetadata, ToolPolicy, TurnRequest,
-    continue_turn_with_artifacts, run_turn, run_turn_with_artifacts,
+    HostTranscriptEntry, HostTranscriptRole, LynxEmbedConfig, ProviderSelection, RuntimeMetadata,
+    ToolPolicy, TurnRequest, continue_turn, continue_turn_with_artifacts, run_turn,
+    run_turn_with_artifacts,
 };
 use pretty_assertions::assert_eq;
 use serde_json::{Value, json};
@@ -366,6 +367,53 @@ fn run_turn_rejects_prestart_abort() {
     });
 }
 
+/// WHY: bootstrap must reject persisted partial turns with unresolved tool
+/// calls so continuation never sends an impossible assistant/tool sequence back
+/// to the provider.
+#[test]
+fn continue_turn_rejects_unresolved_tool_call_transcript_before_execution() {
+    let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+        .build()
+        .expect("runtime");
+
+    runtime.block_on(async {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let events_for_callback = Arc::clone(&events);
+
+        let error = continue_turn(ContinueTurnRequest {
+            config: sample_config(),
+            transcript: vec![assistant_tool_call_transcript_entry(
+                "a1", "call_1", "read", 1,
+            )],
+            on_event: Some(Arc::new(move |event| {
+                events_for_callback
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .push(event);
+            })),
+            abort_signal: None,
+        })
+        .await
+        .expect_err("unresolved tool transcript must fail before execution");
+
+        assert_eq!(error.kind(), EmbedErrorKind::InvalidTranscript);
+        assert!(
+            error
+                .to_string()
+                .contains("unresolved assistant tool_call_id")
+        );
+
+        let events = events.lock().unwrap_or_else(PoisonError::into_inner);
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            events.first(),
+            Some(EmbedEvent::TurnFailed {
+                error: EmbedErrorKind::InvalidTranscript
+            })
+        ));
+    });
+}
+
 /// WHY: provider stream failures after execution starts must surface a stable
 /// runtime error and emit `TurnFailed` instead of pretending the turn ended
 /// successfully.
@@ -611,6 +659,28 @@ fn assistant_message(
         stop_reason,
         error_message: error_message.map(str::to_string),
         timestamp: 1,
+    }
+}
+
+fn assistant_tool_call_transcript_entry(
+    message_id: &str,
+    tool_call_id: &str,
+    tool_name: &str,
+    timestamp_ms: i64,
+) -> HostTranscriptEntry {
+    HostTranscriptEntry {
+        role: HostTranscriptRole::Assistant,
+        message_id: Some(message_id.to_string()),
+        tool_call_id: None,
+        tool_name: None,
+        custom_type: None,
+        content: vec![pi_lynx_sdk::HostContentBlock::ToolCall {
+            tool_call_id: tool_call_id.to_string(),
+            tool_name: tool_name.to_string(),
+            arguments: json!({ "path": "README.md" }),
+        }],
+        is_error: false,
+        timestamp_ms: Some(timestamp_ms),
     }
 }
 

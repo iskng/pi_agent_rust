@@ -30,3 +30,8 @@ Validated the slice with `cargo check -p pi_lynx_sdk`, `cargo fmt --check`, `car
 
 Implemented the runtime/event bridge slice with new `run_turn(...)`, `continue_turn(...)`, and bootstrapped execution helpers so the embed crate can execute deterministic in-process turns without relying on CLI bootstrap or remote-provider tests.
 Added focused `runtime_turn` nextest coverage for no-history prompt execution, reconstructed-history continuation, pre-start cancellation, provider stream failure conversion, host-tool failure normalization, and abort handling during provider streaming and tool execution; validated with `cargo check -p pi_lynx_sdk`, `cargo fmt --check`, `cargo clippy -p pi_lynx_sdk --all-targets --no-deps -- -D warnings`, `cargo doc -p pi_lynx_sdk --no-deps`, and `cargo nextest run -p pi_lynx_sdk`.
+
+## Session 4
+
+Closed the review follow-up by making `reconstruct_history(...)` reject any non-tool transcript entry while assistant tool calls remain unresolved, and by failing transcripts that end before the required tool results are replayed.
+Added focused `history` and `runtime_turn` nextest coverage for unresolved partial-turn transcripts and validated the package with `cargo fmt --check`, `cargo check -p pi_lynx_sdk --all-targets`, `cargo clippy -p pi_lynx_sdk --all-targets --no-deps -- -D warnings`, `cargo doc -p pi_lynx_sdk --no-deps`, and `cargo nextest run -p pi_lynx_sdk`.
