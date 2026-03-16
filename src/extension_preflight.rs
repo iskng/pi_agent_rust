@@ -585,7 +585,7 @@ impl<'a> PreflightAnalyzer<'a> {
                     findings.push(PreflightFinding {
                         severity,
                         category: FindingCategory::ModuleCompat,
-                        message: format!("Module `{specifier}` is {support}",),
+                        message: format!("Module `{specifier}` is {support}"),
                         remediation,
                         file: None,
                         line: lines.first().copied(),

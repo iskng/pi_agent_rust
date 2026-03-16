@@ -1,0 +1,58 @@
+export const MODELS = {
+  azureLegacy: {
+    gpt52: {
+      id: "gpt-5.2",
+      name: "GPT-5.2",
+      api: "azure-openai-responses",
+      provider: "azure-openai-responses",
+      reasoning: true,
+      input: ["text", "image"],
+      context_window: 128000,
+      max_tokens: 16384,
+    },
+    gpt4oMini: {
+      id: "gpt-4o-mini",
+      name: "GPT-4o Mini",
+      api: "azure-openai-responses",
+      provider: "azure-openai-responses",
+      reasoning: true,
+      input: ["text", "image"],
+      context_window: 128000,
+      max_tokens: 16384,
+    },
+  },
+  vercelLegacy: {
+    claudeOpus45: {
+      id: "anthropic/claude-opus-4.5",
+      name: "Claude Opus 4.5",
+      api: "openai-completions",
+      provider: "vercel-ai-gateway",
+      reasoning: true,
+      input: ["text"],
+      context_window: 128000,
+      max_tokens: 16384,
+    },
+    gpt4oMini: {
+      id: "openai/gpt-4o-mini",
+      name: "GPT-4o Mini",
+      api: "openai-completions",
+      provider: "vercel-ai-gateway",
+      reasoning: true,
+      input: ["text"],
+      context_window: 128000,
+      max_tokens: 16384,
+    },
+  },
+  kimiCodingLegacy: {
+    kimiK2Thinking: {
+      id: "kimi-k2-thinking",
+      name: "Kimi K2 Thinking",
+      api: "anthropic-messages",
+      provider: "kimi-coding",
+      reasoning: true,
+      input: ["text", "image"],
+      context_window: 262144,
+      max_tokens: 32768,
+    },
+  },
+} as const;

@@ -6403,13 +6403,11 @@ impl AgentSession {
         let mut images = Vec::new();
         for block in blocks {
             match block {
-                ContentBlock::Text(text_block) => {
-                    if !text_block.text.trim().is_empty() {
-                        if !text.is_empty() {
-                            text.push('\n');
-                        }
-                        text.push_str(&text_block.text);
+                ContentBlock::Text(text_block) if !text_block.text.trim().is_empty() => {
+                    if !text.is_empty() {
+                        text.push('\n');
                     }
+                    text.push_str(&text_block.text);
                 }
                 ContentBlock::Image(image) => images.push(image.clone()),
                 _ => {}

@@ -14,16 +14,21 @@ keywords = ["ai", "cli", "coding-agent", "llm", "anthropic"]
 categories = ["command-line-utilities", "development-tools"]
 include = [
     "docs/extension-artifact-provenance.json",
+    "docs/legacy-models.generated.ts",
     "docs/wit/extension.wit",
     "docs/provider-upstream-model-ids-snapshot.json",
     "docs/schema/extension_protocol.json",
-    "legacy_pi_mono_code/pi-mono/packages/ai/src/models.generated.ts",
     "Cargo.toml",
     "LICENSE",
     "README.md",
     "build.rs",
     "src/**",
 ]
+
+[workspace]
+members = [".", "crates/pi_lynx_sdk"]
+default-members = ["."]
+resolver = "2"
 
 [lib]
 name = "pi"

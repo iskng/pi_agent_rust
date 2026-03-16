@@ -1310,7 +1310,7 @@ impl RegimeShiftDetector {
             let delta = score - self.mean;
             self.mean += delta / count_f64;
             let delta2 = score - self.mean;
-            self.m2 += delta * delta2;
+            self.m2 = delta.mul_add(delta2, self.m2);
         }
 
         RegimeObservation {

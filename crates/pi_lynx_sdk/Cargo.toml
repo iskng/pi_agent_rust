@@ -1,0 +1,20 @@
+[package]
+name = "pi_lynx_sdk"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+base64 = "0.22"
+pi = { package = "pi_agent_rust", path = "../.." }
+serde = { version = "1", features = ["derive", "rc"] }
+serde_json = { version = "1", features = ["raw_value"] }
+thiserror = "2"
+tracing = "0.1"
+
+[dev-dependencies]
+pretty_assertions = "1"
