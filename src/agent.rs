@@ -1666,29 +1666,29 @@ impl Agent {
         abort: Option<AbortSignal>,
     ) -> (Vec<(usize, (ToolOutput, bool))>, BTreeSet<usize>) {
         let mut started_markers = BTreeMap::new();
-        let mut batch_items = Vec::with_capacity(batch.len());
+        let mut pending = VecDeque::with_capacity(batch.len());
         for (idx, tool_call) in batch {
             let execution_started = Arc::new(AtomicBool::new(false));
             started_markers.insert(idx, Arc::clone(&execution_started));
-            batch_items.push((idx, tool_call, execution_started));
+            pending.push_back((idx, tool_call, execution_started));
         }
 
-        let futures = batch_items
-            .into_iter()
-            .map(|(idx, tool_call, execution_started)| {
-                let on_event = Arc::clone(&on_event);
-                async move {
-                    (
-                        idx,
-                        self.execute_tool_owned(tool_call, on_event, execution_started)
-                            .await,
-                    )
-                }
-            });
+        let mut running: stream::FuturesUnordered<BoxFuture<'_, (usize, (ToolOutput, bool))>> =
+            stream::FuturesUnordered::new();
+        while running.len() < MAX_CONCURRENT_TOOLS {
+            let Some((idx, tool_call, execution_started)) = pending.pop_front() else {
+                break;
+            };
+            let on_event = Arc::clone(&on_event);
+            running.push(Box::pin(async move {
+                (
+                    idx,
+                    self.execute_tool_owned(tool_call, on_event, execution_started)
+                        .await,
+                )
+            }));
+        }
 
-        let mut buffered = stream::iter(futures)
-            .buffer_unordered(MAX_CONCURRENT_TOOLS)
-            .fuse();
         let mut batch_results = Vec::new();
 
         if let Some(signal) = abort.as_ref() {
@@ -1696,17 +1696,59 @@ impl Agent {
             futures::pin_mut!(abort_fut);
 
             loop {
-                futures::select! {
-                    result = buffered.next() => match result {
-                        Some(result) => batch_results.push(result),
+                if running.is_empty() {
+                    break;
+                }
+
+                futures::select_biased! {
+                    result = running.next() => match result {
+                        Some(result) => {
+                            batch_results.push(result);
+                            while running.len() < MAX_CONCURRENT_TOOLS {
+                                let Some((idx, tool_call, execution_started)) = pending.pop_front()
+                                else {
+                                    break;
+                                };
+                                let on_event = Arc::clone(&on_event);
+                                running.push(Box::pin(async move {
+                                    (
+                                        idx,
+                                        self.execute_tool_owned(
+                                            tool_call,
+                                            on_event,
+                                            execution_started,
+                                        )
+                                        .await,
+                                    )
+                                }));
+                            }
+                        }
                         None => break,
                     },
-                    () = abort_fut => break,
+                    () = abort_fut => {
+                        while let Some(Some(result)) = running.next().now_or_never() {
+                            batch_results.push(result);
+                        }
+                        break;
+                    },
                 }
             }
         } else {
-            while let Some(result) = buffered.next().await {
+            while let Some(result) = running.next().await {
                 batch_results.push(result);
+                while running.len() < MAX_CONCURRENT_TOOLS {
+                    let Some((idx, tool_call, execution_started)) = pending.pop_front() else {
+                        break;
+                    };
+                    let on_event = Arc::clone(&on_event);
+                    running.push(Box::pin(async move {
+                        (
+                            idx,
+                            self.execute_tool_owned(tool_call, on_event, execution_started)
+                                .await,
+                        )
+                    }));
+                }
             }
         }
 
@@ -1876,7 +1918,7 @@ impl Agent {
                         is_error,
                     },
                     is_error,
-                    executed: true,
+                    executed: tool_started[index],
                 });
 
                 let msg = Message::ToolResult(Arc::clone(&tool_result));
@@ -4231,6 +4273,72 @@ mod abort_tests {
     }
 
     #[derive(Debug)]
+    struct MissingToolExecutionProvider {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    #[allow(clippy::unnecessary_literal_bound)]
+    impl Provider for MissingToolExecutionProvider {
+        fn name(&self) -> &str {
+            "test-provider"
+        }
+
+        fn api(&self) -> &str {
+            "test-api"
+        }
+
+        fn model_id(&self) -> &str {
+            "test-model"
+        }
+
+        async fn stream(
+            &self,
+            _context: &Context<'_>,
+            _options: &StreamOptions,
+        ) -> crate::error::Result<
+            Pin<Box<dyn Stream<Item = crate::error::Result<StreamEvent>> + Send>>,
+        > {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            let message = if call == 0 {
+                AssistantMessage {
+                    content: vec![ContentBlock::ToolCall(ToolCall {
+                        id: "call-missing".to_string(),
+                        name: "missing_tool".to_string(),
+                        arguments: json!({}),
+                        thought_signature: None,
+                    })],
+                    api: "test-api".to_string(),
+                    provider: "test-provider".to_string(),
+                    model: "test-model".to_string(),
+                    usage: Usage::default(),
+                    stop_reason: StopReason::ToolUse,
+                    error_message: None,
+                    timestamp: 0,
+                }
+            } else {
+                AssistantMessage {
+                    content: vec![ContentBlock::Text(TextContent::new("done"))],
+                    api: "test-api".to_string(),
+                    provider: "test-provider".to_string(),
+                    model: "test-model".to_string(),
+                    usage: Usage::default(),
+                    stop_reason: StopReason::Stop,
+                    error_message: None,
+                    timestamp: 0,
+                }
+            };
+
+            Ok(Box::pin(futures::stream::iter(vec![Ok(
+                StreamEvent::Done {
+                    reason: message.stop_reason,
+                    message,
+                },
+            )])))
+        }
+    }
+
+    #[derive(Debug)]
     struct HangingTool;
 
     #[async_trait]
@@ -4507,6 +4615,98 @@ mod abort_tests {
                 details: None,
                 is_error: false,
             })
+        }
+    }
+
+    #[derive(Debug)]
+    struct CoordinatedReadyReadOnlyTool {
+        started_count: Arc<AtomicUsize>,
+        started_notify: Arc<Notify>,
+        release: Arc<Notify>,
+    }
+
+    #[async_trait]
+    #[allow(clippy::unnecessary_literal_bound)]
+    impl Tool for CoordinatedReadyReadOnlyTool {
+        fn name(&self) -> &str {
+            "coordinated_ready_read_only"
+        }
+
+        fn label(&self) -> &str {
+            "Coordinated Ready Read Only"
+        }
+
+        fn description(&self) -> &str {
+            "Waits for a coordinated release before returning immediately"
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            json!({ "type": "object" })
+        }
+
+        fn is_read_only(&self) -> bool {
+            true
+        }
+
+        async fn execute(
+            &self,
+            _tool_call_id: &str,
+            _input: serde_json::Value,
+            _on_update: Option<Box<dyn Fn(ToolUpdate) + Send + Sync>>,
+        ) -> crate::error::Result<ToolOutput> {
+            self.started_count.fetch_add(1, Ordering::SeqCst);
+            self.started_notify.notify_waiters();
+            self.release.notified().await;
+
+            Ok(ToolOutput {
+                content: vec![ContentBlock::Text(TextContent::new("ready result"))],
+                details: None,
+                is_error: false,
+            })
+        }
+    }
+
+    #[derive(Debug)]
+    struct CoordinatedHangingReadOnlyTool {
+        started_count: Arc<AtomicUsize>,
+        started_notify: Arc<Notify>,
+        release: Arc<Notify>,
+    }
+
+    #[async_trait]
+    #[allow(clippy::unnecessary_literal_bound)]
+    impl Tool for CoordinatedHangingReadOnlyTool {
+        fn name(&self) -> &str {
+            "coordinated_hanging_read_only"
+        }
+
+        fn label(&self) -> &str {
+            "Coordinated Hanging Read Only"
+        }
+
+        fn description(&self) -> &str {
+            "Starts with the ready tool but never completes after release"
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            json!({ "type": "object" })
+        }
+
+        fn is_read_only(&self) -> bool {
+            true
+        }
+
+        async fn execute(
+            &self,
+            _tool_call_id: &str,
+            _input: serde_json::Value,
+            _on_update: Option<Box<dyn Fn(ToolUpdate) + Send + Sync>>,
+        ) -> crate::error::Result<ToolOutput> {
+            self.started_count.fetch_add(1, Ordering::SeqCst);
+            self.started_notify.notify_waiters();
+            self.release.notified().await;
+            futures::future::pending::<()>().await;
+            unreachable!("coordinated hanging tool should be aborted by the agent")
         }
     }
 
@@ -5028,6 +5228,101 @@ mod abort_tests {
         });
     }
 
+    /// WHY: when abort and a finished read-only result become ready together,
+    /// the batch must keep the completed output instead of dropping it.
+    #[test]
+    fn parallel_batch_prioritizes_ready_results_when_abort_is_also_ready() {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime build");
+        let handle = runtime.handle();
+
+        runtime.block_on(async move {
+            let provider = Arc::new(CountingProvider {
+                calls: Arc::new(AtomicUsize::new(0)),
+            });
+            let started_count = Arc::new(AtomicUsize::new(0));
+            let started_notify = Arc::new(Notify::new());
+            let release = Arc::new(Notify::new());
+            let tools = ToolRegistry::from_tools(vec![
+                Box::new(CoordinatedReadyReadOnlyTool {
+                    started_count: Arc::clone(&started_count),
+                    started_notify: Arc::clone(&started_notify),
+                    release: Arc::clone(&release),
+                }),
+                Box::new(CoordinatedHangingReadOnlyTool {
+                    started_count: Arc::clone(&started_count),
+                    started_notify: Arc::clone(&started_notify),
+                    release: Arc::clone(&release),
+                }),
+            ]);
+            let agent = Agent::new(provider, tools, AgentConfig::default());
+
+            for attempt in 0..32 {
+                let (abort_handle, abort_signal) = AbortHandle::new();
+                let started_count_for_controller = Arc::clone(&started_count);
+                let started_notify_for_controller = Arc::clone(&started_notify);
+                let release_for_controller = Arc::clone(&release);
+                let controller = handle.spawn(async move {
+                    while started_count_for_controller.load(Ordering::SeqCst) < 2 {
+                        started_notify_for_controller.notified().await;
+                    }
+                    release_for_controller.notify_waiters();
+                    abort_handle.abort();
+                });
+
+                let (results, started_indices) = agent
+                    .execute_parallel_batch(
+                        vec![
+                            (
+                                0,
+                                ToolCall {
+                                    id: format!("call-ready-{attempt}"),
+                                    name: "coordinated_ready_read_only".to_string(),
+                                    arguments: json!({}),
+                                    thought_signature: None,
+                                },
+                            ),
+                            (
+                                1,
+                                ToolCall {
+                                    id: format!("call-hanging-{attempt}"),
+                                    name: "coordinated_hanging_read_only".to_string(),
+                                    arguments: json!({}),
+                                    thought_signature: None,
+                                },
+                            ),
+                        ],
+                        Arc::new(|_| {}),
+                        Some(abort_signal),
+                    )
+                    .await;
+                controller.await;
+
+                assert!(
+                    started_indices.contains(&0),
+                    "ready tool should have started on attempt {attempt}: {started_indices:?}"
+                );
+                assert!(
+                    started_indices.contains(&1),
+                    "hanging tool should have started on attempt {attempt}: {started_indices:?}"
+                );
+                assert!(
+                    results.iter().any(|(idx, (output, is_error))| {
+                        *idx == 0
+                            && !is_error
+                            && matches!(
+                                output.content.as_slice(),
+                                [ContentBlock::Text(text)] if text.text == "ready result"
+                            )
+                    }),
+                    "missing completed ready result on attempt {attempt}: {results:?}"
+                );
+                started_count.store(0, Ordering::SeqCst);
+            }
+        });
+    }
+
     /// WHY: aborts that land while extension hooks are still running must not
     /// claim the host tool adapter executed before `ToolExecutionStart`.
     #[test]
@@ -5114,6 +5409,88 @@ mod abort_tests {
                     executed: false,
                     ..
                 } if tool_call_id == "call-hook"
+            )));
+        });
+    }
+
+    /// WHY: tool failures that never enter a host adapter must report
+    /// `executed: false` so embed metadata does not count them as real runs.
+    #[test]
+    fn missing_tool_failure_keeps_executed_false_without_start_event() {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime build");
+
+        runtime.block_on(async move {
+            let provider = Arc::new(MissingToolExecutionProvider {
+                calls: AtomicUsize::new(0),
+            });
+            let agent = Agent::new(
+                provider,
+                ToolRegistry::new(&[], Path::new("."), None),
+                AgentConfig::default(),
+            );
+            let session = Arc::new(Mutex::new(Session::in_memory()));
+            let mut agent_session = AgentSession::new(
+                agent,
+                Arc::clone(&session),
+                false,
+                ResolvedCompactionSettings::default(),
+            );
+            let events = Arc::new(StdMutex::new(Vec::new()));
+
+            let result = agent_session
+                .run_text("trigger missing tool".to_string(), {
+                    let events = Arc::clone(&events);
+                    move |event| {
+                        events
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .push(event);
+                    }
+                })
+                .await
+                .expect("missing tool run");
+
+            assert_eq!(result.stop_reason, StopReason::Stop);
+
+            let events = events
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            assert!(
+                !events
+                    .iter()
+                    .any(|event| matches!(event, AgentEvent::ToolExecutionStart { .. })),
+                "missing tools must not emit ToolExecutionStart: {events:?}"
+            );
+            assert!(events.iter().any(|event| matches!(
+                event,
+                AgentEvent::ToolExecutionEnd {
+                    tool_call_id,
+                    executed: false,
+                    ..
+                } if tool_call_id == "call-missing"
+            )));
+
+            let cx = crate::agent_cx::AgentCx::for_request();
+            let persisted = session
+                .lock(cx.cx())
+                .await
+                .expect("lock session")
+                .to_messages_for_current_path();
+            let tool_result = persisted
+                .iter()
+                .find_map(|message| match message {
+                    Message::ToolResult(result) => Some(Arc::clone(result)),
+                    _ => None,
+                })
+                .expect("expected missing tool result");
+            assert!(tool_result.is_error);
+            assert!(tool_result.content.iter().any(|block| matches!(
+                block,
+                ContentBlock::Text(text)
+                    if text.text.contains("Error: Tool 'missing_tool' not found")
             )));
         });
     }

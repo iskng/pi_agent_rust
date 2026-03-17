@@ -104,6 +104,7 @@ Benchmarks: tools, extensions, system, tui_perf.
 - **Clippy blocks CI**: Fix all warnings; CI uses -D warnings
 - **Workspace default-members skip embed crates**: Validate `pi_lynx_sdk` with `-p pi_lynx_sdk` or `--workspace`, not bare `cargo check`
 - **Package clippy for embed crates**: Use `cargo clippy -p pi_lynx_sdk --all-targets --no-deps -- -D warnings` to avoid unrelated root-crate lints from the path dependency
+- **Root clippy currently has unrelated blockers**: `cargo clippy --all-targets -- -D warnings` is presently failing in `src/extensions.rs`, `src/extensions_js.rs`, `src/interactive/*`, `src/providers/bedrock.rs`, `src/rpc.rs`, `src/scheduler.rs`, `src/session*.rs`, and `src/sse.rs`
 - **Tool lifecycle semantics**: `AgentEvent::ToolExecutionStart` now means actual adapter entry; skipped/aborted proposals may still emit `ToolExecutionEnd { executed: false, .. }` without a matching start
 - **Abort waiters**: when using `AbortSignal::wait()`, register `notify.notified()` before the second aborted check to avoid lost-wake hangs on same-thread aborts
 - **Fresh tmp target dirs can trip `tikv-jemalloc-sys` on this macOS host**: if `/data/tmp` is unavailable and a clean `/tmp` target build fails in jemalloc configure, rerun package validation with the default workspace target cache
