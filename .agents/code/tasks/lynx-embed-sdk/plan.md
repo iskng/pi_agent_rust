@@ -1,7 +1,7 @@
 # Implementation Plan - lynx-embed-sdk
 
 > Generated: 2026-03-16
-> Status: PLANNED
+> Status: COMPLETE
 
 - [x] [P0][L][T1] Add workspace wiring in `/Users/user/dev/oss/thirdparty/pi_agent_rust/Cargo.toml`, create `crates/pi_lynx_sdk`, and set `default-members` so adding the new crate does not change the existing root package build/test/bootstrap behavior
 - [x] [P0][M][T2] Define and document the embed contract in `crates/pi_lynx_sdk/src/lib.rs` and `crates/pi_lynx_sdk/src/types.rs`, including `LynxEmbedConfig`, `ProviderSelection`, `ProviderStreamOverride`, `QueueModeConfig`, transcript/result/event types, runtime metadata, history warnings, and `#[must_use]` builders where appropriate
@@ -35,3 +35,16 @@ Added focused `runtime_turn` nextest coverage for no-history prompt execution, r
 
 Closed the review follow-up by making `reconstruct_history(...)` reject any non-tool transcript entry while assistant tool calls remain unresolved, and by failing transcripts that end before the required tool results are replayed.
 Added focused `history` and `runtime_turn` nextest coverage for unresolved partial-turn transcripts and validated the package with `cargo fmt --check`, `cargo check -p pi_lynx_sdk --all-targets`, `cargo clippy -p pi_lynx_sdk --all-targets --no-deps -- -D warnings`, `cargo doc -p pi_lynx_sdk --no-deps`, and `cargo nextest run -p pi_lynx_sdk`.
+
+- [x] [P1][M][T13] Enforce tool-result replay order within a single assistant tool-use batch so reconstructed multi-tool transcripts match the sequential replay order Pi uses during `Agent::execute_tool_calls(...)`
+- [x] [P1][M][T14] Make embed event capture explicitly opt-in per turn so callback-only hosts do not retain duplicated provider and tool streams in memory
+
+## Session 5
+
+Closed the final two review follow-ups by making `reconstruct_history(...)` reject out-of-order multi-tool result replay and by adding an explicit `capture_events` request flag so callback-only turns no longer clone every emitted event into `TurnResult`.
+Validated the completed embed crate with `cargo fmt --check`, `cargo check -p pi_lynx_sdk --all-targets`, `cargo clippy -p pi_lynx_sdk --all-targets --no-deps -- -D warnings`, and `cargo nextest run -p pi_lynx_sdk`; resolved both open `mung` issues for ordered tool replay and optional event capture.
+
+## Session 6
+
+Closed the remaining review regressions by scoping transcript tool-call tracking to the active unresolved assistant batch so `tool_call_id` values can be reused after a prior batch fully resolves, and by skipping policy-disabled host tools before registry validation so inactive adapters cannot fail embed bootstrap.
+Validated the fixes with `cargo fmt --check`, `cargo check -p pi_lynx_sdk --all-targets`, `cargo clippy -p pi_lynx_sdk --all-targets --no-deps -- -D warnings`, `cargo nextest run -p pi_lynx_sdk --test history --test tool_bridge`, and `cargo nextest run -p pi_lynx_sdk`; resolved `mung` issues `1773706520-82145-0` and `1773706520-82148-0`.

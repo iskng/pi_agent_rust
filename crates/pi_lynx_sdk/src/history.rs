@@ -11,20 +11,25 @@ use pi::sdk::{
     AssistantMessage, ContentBlock, CustomMessage, ImageContent, Message, StopReason, TextContent,
     ThinkingContent, ToolCall, ToolResultMessage, Usage, UserContent, UserMessage,
 };
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 /// Reconstruct Pi message history from host-owned transcript entries.
 pub fn reconstruct_history(transcript: &[HostTranscriptEntry]) -> Result<HistoryConversionResult> {
     let mut messages = Vec::with_capacity(transcript.len());
     let mut warnings = Vec::new();
-    let mut tool_calls = BTreeMap::<String, String>::new();
-    let mut pending_tool_calls = BTreeMap::<String, String>::new();
+    let mut active_tool_calls = BTreeMap::<String, String>::new();
+    let mut pending_tool_calls = VecDeque::<(String, String)>::new();
     let mut completed_tool_calls = BTreeSet::<String>::new();
 
     for entry in transcript {
         match entry.role {
             HostTranscriptRole::User => {
                 ensure_no_pending_tool_calls(entry, &pending_tool_calls)?;
+                clear_resolved_tool_batch(
+                    &pending_tool_calls,
+                    &mut active_tool_calls,
+                    &mut completed_tool_calls,
+                );
                 let blocks = convert_blocks(entry, TranscriptRole::User, &mut warnings)?;
                 let content = match blocks.as_slice() {
                     [ContentBlock::Text(text)] => UserContent::Text(text.text.clone()),
@@ -37,10 +42,15 @@ pub fn reconstruct_history(transcript: &[HostTranscriptEntry]) -> Result<History
             }
             HostTranscriptRole::Assistant => {
                 ensure_no_pending_tool_calls(entry, &pending_tool_calls)?;
+                clear_resolved_tool_batch(
+                    &pending_tool_calls,
+                    &mut active_tool_calls,
+                    &mut completed_tool_calls,
+                );
                 let content = convert_blocks(entry, TranscriptRole::Assistant, &mut warnings)?;
                 for block in &content {
                     if let ContentBlock::ToolCall(tool_call) = block {
-                        if tool_calls
+                        if active_tool_calls
                             .insert(tool_call.id.clone(), tool_call.name.clone())
                             .is_some()
                         {
@@ -52,7 +62,8 @@ pub fn reconstruct_history(transcript: &[HostTranscriptEntry]) -> Result<History
                                 ),
                             ));
                         }
-                        pending_tool_calls.insert(tool_call.id.clone(), tool_call.name.clone());
+                        pending_tool_calls
+                            .push_back((tool_call.id.clone(), tool_call.name.clone()));
                     }
                 }
 
@@ -88,13 +99,19 @@ pub fn reconstruct_history(transcript: &[HostTranscriptEntry]) -> Result<History
                 let tool_name = entry.tool_name.clone().ok_or_else(|| {
                     transcript_error(entry, "tool result entry is missing tool_name")
                 })?;
-                let Some(expected_name) = tool_calls.get(&tool_call_id) else {
+                let Some(expected_name) = active_tool_calls.get(&tool_call_id) else {
                     return Err(transcript_error(
                         entry,
-                        format!("tool result references unknown tool_call_id '{tool_call_id}'"),
+                        if completed_tool_calls.contains(&tool_call_id) {
+                            format!("duplicate tool result for tool_call_id '{tool_call_id}'")
+                        } else {
+                            format!("tool result references unknown tool_call_id '{tool_call_id}'")
+                        },
                     ));
                 };
-                let Some(pending_name) = pending_tool_calls.remove(&tool_call_id) else {
+                let Some((pending_tool_call_id, pending_name)) =
+                    pending_tool_calls.front().cloned()
+                else {
                     let message = if completed_tool_calls.contains(&tool_call_id) {
                         format!("duplicate tool result for tool_call_id '{tool_call_id}'")
                     } else {
@@ -105,6 +122,15 @@ all assistant tool calls must be resolved before the next non-tool transcript en
                     };
                     return Err(transcript_error(entry, message));
                 };
+                if pending_tool_call_id != tool_call_id {
+                    return Err(transcript_error(
+                        entry,
+                        format!(
+                            "tool result for tool_call_id '{tool_call_id}' is out of order; \
+expected '{pending_tool_call_id}' next to match the assistant tool-call replay order"
+                        ),
+                    ));
+                }
                 if expected_name != &tool_name {
                     return Err(transcript_error(
                         entry,
@@ -123,6 +149,7 @@ all assistant tool calls must be resolved before the next non-tool transcript en
                         ),
                     ));
                 }
+                pending_tool_calls.pop_front();
                 if !completed_tool_calls.insert(tool_call_id.clone()) {
                     return Err(transcript_error(
                         entry,
@@ -177,8 +204,8 @@ all assistant tool calls must be resolved before the next non-tool transcript en
 
     if !pending_tool_calls.is_empty() {
         let unresolved = pending_tool_calls
-            .keys()
-            .map(String::as_str)
+            .iter()
+            .map(|(tool_call_id, _)| tool_call_id.as_str())
             .collect::<Vec<_>>()
             .join(", ");
         return Err(EmbedError::transcript(format!(
@@ -280,17 +307,28 @@ fn transcript_error(entry: &HostTranscriptEntry, message: impl Into<String>) -> 
     EmbedError::transcript(context)
 }
 
+fn clear_resolved_tool_batch(
+    pending_tool_calls: &VecDeque<(String, String)>,
+    active_tool_calls: &mut BTreeMap<String, String>,
+    completed_tool_calls: &mut BTreeSet<String>,
+) {
+    if pending_tool_calls.is_empty() {
+        active_tool_calls.clear();
+        completed_tool_calls.clear();
+    }
+}
+
 fn ensure_no_pending_tool_calls(
     entry: &HostTranscriptEntry,
-    pending_tool_calls: &BTreeMap<String, String>,
+    pending_tool_calls: &VecDeque<(String, String)>,
 ) -> Result<()> {
     if pending_tool_calls.is_empty() {
         return Ok(());
     }
 
     let unresolved = pending_tool_calls
-        .keys()
-        .map(String::as_str)
+        .iter()
+        .map(|(tool_call_id, _)| tool_call_id.as_str())
         .collect::<Vec<_>>()
         .join(", ");
     Err(transcript_error(

@@ -249,6 +249,7 @@ fn run_turn_with_artifacts_emits_message_events_and_result_metadata() {
                         .unwrap_or_else(PoisonError::into_inner)
                         .push(event);
                 })),
+                capture_events: true,
                 abort_signal: None,
             },
             bootstrap_artifacts(provider, empty_tool_registry(), Vec::new()),
@@ -311,6 +312,7 @@ fn continue_turn_with_artifacts_uses_reconstructed_history() {
                 config: sample_config(),
                 transcript: Vec::new(),
                 on_event: None,
+                capture_events: false,
                 abort_signal: None,
             },
             bootstrap_artifacts(provider, empty_tool_registry(), history),
@@ -350,6 +352,7 @@ fn run_turn_rejects_prestart_abort() {
                     .unwrap_or_else(PoisonError::into_inner)
                     .push(event);
             })),
+            capture_events: false,
             abort_signal: Some(abort_signal),
         })
         .await
@@ -391,6 +394,7 @@ fn continue_turn_rejects_unresolved_tool_call_transcript_before_execution() {
                     .unwrap_or_else(PoisonError::into_inner)
                     .push(event);
             })),
+            capture_events: false,
             abort_signal: None,
         })
         .await
@@ -445,6 +449,7 @@ fn run_turn_with_artifacts_converts_provider_stream_failure_into_error() {
                         .unwrap_or_else(PoisonError::into_inner)
                         .push(event);
                 })),
+                capture_events: false,
                 abort_signal: None,
             },
             bootstrap_artifacts(provider, empty_tool_registry(), Vec::new()),
@@ -509,6 +514,7 @@ fn runtime_handles_tool_failures_and_abort_paths() {
                 transcript: Vec::new(),
                 prompt: "read the file".to_string(),
                 on_event: None,
+                capture_events: false,
                 abort_signal: None,
             },
             bootstrap_artifacts(tool_provider, tool_registry, Vec::new()),
@@ -539,6 +545,7 @@ fn runtime_handles_tool_failures_and_abort_paths() {
                         stream_abort_handle.abort();
                     }
                 })),
+                capture_events: true,
                 abort_signal: Some(stream_abort_signal),
             },
             bootstrap_artifacts(stream_provider, empty_tool_registry(), Vec::new()),
@@ -583,6 +590,7 @@ fn runtime_handles_tool_failures_and_abort_paths() {
                         tool_abort_handle.abort();
                     }
                 })),
+                capture_events: false,
                 abort_signal: Some(tool_abort_signal),
             },
             bootstrap_artifacts(hanging_provider, hanging_registry, Vec::new()),
@@ -594,6 +602,117 @@ fn runtime_handles_tool_failures_and_abort_paths() {
         assert!(tool_abort_result.result_metadata.aborted);
         assert_eq!(tool_abort_result.result_metadata.tool_calls_executed, 1);
         assert!(tool_abort_result.result_metadata.had_errors);
+        assert!(tool_abort_result.emitted_events.is_none());
+    });
+}
+
+/// WHY: hosts may consume stream callbacks without retaining a second in-memory
+/// copy of the entire event stream for the completed turn result.
+#[test]
+fn run_turn_with_artifacts_skips_event_capture_when_not_requested() {
+    let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+        .build()
+        .expect("runtime");
+
+    runtime.block_on(async {
+        let provider = Arc::new(ScriptedProvider {
+            steps: Mutex::new(VecDeque::from([ProviderStep::Text {
+                expected_messages: 1,
+                text: "hello without capture",
+            }])),
+        });
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let events_for_callback = Arc::clone(&events);
+
+        let result = run_turn_with_artifacts(
+            TurnRequest {
+                config: sample_config(),
+                transcript: Vec::new(),
+                prompt: "say hello".to_string(),
+                on_event: Some(Arc::new(move |event| {
+                    events_for_callback
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .push(event);
+                })),
+                capture_events: false,
+                abort_signal: None,
+            },
+            bootstrap_artifacts(provider, empty_tool_registry(), Vec::new()),
+        )
+        .await
+        .expect("turn result");
+
+        assert!(result.emitted_events.is_none());
+
+        let callback_events = events.lock().unwrap_or_else(PoisonError::into_inner);
+        assert!(!callback_events.is_empty());
+        assert!(matches!(
+            callback_events.first(),
+            Some(EmbedEvent::TurnStarted)
+        ));
+        assert!(matches!(
+            callback_events.last(),
+            Some(EmbedEvent::TurnCompleted)
+        ));
+    });
+}
+
+/// WHY: multi-tool continuation must fail before execution when persisted tool
+/// results do not match the replay order Pi uses inside the agent loop.
+#[test]
+fn continue_turn_rejects_out_of_order_multi_tool_replay_before_execution() {
+    let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+        .build()
+        .expect("runtime");
+
+    runtime.block_on(async {
+        let error = continue_turn(ContinueTurnRequest {
+            config: sample_config(),
+            transcript: vec![
+                HostTranscriptEntry {
+                    role: HostTranscriptRole::Assistant,
+                    message_id: Some("a1".to_string()),
+                    tool_call_id: None,
+                    tool_name: None,
+                    custom_type: None,
+                    content: vec![
+                        pi_lynx_sdk::HostContentBlock::ToolCall {
+                            tool_call_id: "call_1".to_string(),
+                            tool_name: "read".to_string(),
+                            arguments: json!({ "path": "README.md" }),
+                        },
+                        pi_lynx_sdk::HostContentBlock::ToolCall {
+                            tool_call_id: "call_2".to_string(),
+                            tool_name: "search".to_string(),
+                            arguments: json!({ "pattern": "lynx" }),
+                        },
+                    ],
+                    is_error: false,
+                    timestamp_ms: Some(1),
+                },
+                HostTranscriptEntry {
+                    role: HostTranscriptRole::ToolResult,
+                    message_id: Some("t2".to_string()),
+                    tool_call_id: Some("call_2".to_string()),
+                    tool_name: Some("search".to_string()),
+                    custom_type: None,
+                    content: vec![pi_lynx_sdk::HostContentBlock::Text {
+                        text: "search output".to_string(),
+                    }],
+                    is_error: false,
+                    timestamp_ms: Some(2),
+                },
+            ],
+            on_event: None,
+            capture_events: false,
+            abort_signal: None,
+        })
+        .await
+        .expect_err("out-of-order transcript must fail before execution");
+
+        assert_eq!(error.kind(), EmbedErrorKind::InvalidTranscript);
+        assert!(error.to_string().contains("expected 'call_1'"));
     });
 }
 

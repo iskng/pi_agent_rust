@@ -41,6 +41,7 @@ pub async fn run_turn_with_artifacts(
         artifacts,
         ExecutionMode::Prompt {
             prompt: request.prompt,
+            capture_events: request.capture_events,
         },
         request.on_event,
         request.abort_signal,
@@ -78,7 +79,9 @@ pub async fn continue_turn_with_artifacts(
     execute_turn(
         request.config,
         artifacts,
-        ExecutionMode::Continue,
+        ExecutionMode::Continue {
+            capture_events: request.capture_events,
+        },
         request.on_event,
         request.abort_signal,
     )
@@ -87,8 +90,13 @@ pub async fn continue_turn_with_artifacts(
 
 #[derive(Debug)]
 enum ExecutionMode {
-    Prompt { prompt: String },
-    Continue,
+    Prompt {
+        prompt: String,
+        capture_events: bool,
+    },
+    Continue {
+        capture_events: bool,
+    },
 }
 
 async fn execute_turn(
@@ -111,7 +119,7 @@ async fn execute_turn(
     let model_id = provider.model_id().to_string();
     let session_id = session.header.id.clone();
 
-    let bridge = EventBridge::new(on_event);
+    let bridge = EventBridge::new(on_event, request_capture_events(&execution_mode));
     bridge.emit_turn_started();
 
     let mut agent = Agent::new(provider, tool_registry, agent_config);
@@ -120,7 +128,7 @@ async fn execute_turn(
 
     let bridge_for_run = bridge.clone();
     let assistant = match execution_mode {
-        ExecutionMode::Prompt { prompt } => {
+        ExecutionMode::Prompt { prompt, .. } => {
             let prompt_message = Message::User(UserMessage {
                 content: UserContent::Text(prompt),
                 timestamp: unix_timestamp_ms(),
@@ -131,7 +139,7 @@ async fn execute_turn(
                 })
                 .await
         }
-        ExecutionMode::Continue => {
+        ExecutionMode::Continue { .. } => {
             agent
                 .run_continue_with_abort(abort_signal, move |event| {
                     bridge_for_run.handle_agent_event(event);
@@ -206,7 +214,7 @@ fn finalize_success(
     Ok(TurnResult {
         stop_reason: Some(assistant_message.stop_reason),
         usage: Some(assistant_message.usage.clone()),
-        emitted_events: Some(snapshot.emitted_events),
+        emitted_events: snapshot.emitted_events,
         result_metadata: TurnResultMetadata {
             provider_id: provider_id.to_string(),
             model_id: model_id.to_string(),
@@ -251,6 +259,13 @@ fn emit_prestart_failure(
 ) {
     if let Some(on_event) = on_event {
         on_event(crate::types::EmbedEvent::TurnFailed { error: kind });
+    }
+}
+
+fn request_capture_events(execution_mode: &ExecutionMode) -> bool {
+    match execution_mode {
+        ExecutionMode::Prompt { capture_events, .. }
+        | ExecutionMode::Continue { capture_events } => *capture_events,
     }
 }
 

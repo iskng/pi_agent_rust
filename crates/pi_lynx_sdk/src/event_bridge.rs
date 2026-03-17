@@ -10,7 +10,7 @@ type EventCallback = Arc<dyn Fn(EmbedEvent) + Send + Sync>;
 /// Snapshot of embed event emission collected during one turn.
 #[derive(Debug, Clone)]
 pub(crate) struct EventBridgeSnapshot {
-    pub emitted_events: Vec<EmbedEvent>,
+    pub emitted_events: Option<Vec<EmbedEvent>>,
     pub tool_calls_executed: usize,
     pub had_errors: bool,
 }
@@ -21,11 +21,11 @@ pub(crate) struct EventBridge {
 }
 
 impl EventBridge {
-    pub(crate) fn new(callback: Option<EventCallback>) -> Self {
+    pub(crate) fn new(callback: Option<EventCallback>, capture_events: bool) -> Self {
         Self {
             inner: Arc::new(Mutex::new(EventBridgeState {
                 callback,
-                emitted_events: Vec::new(),
+                emitted_events: capture_events.then(Vec::new),
                 tool_calls_executed: 0,
                 had_errors: false,
                 terminal_emitted: false,
@@ -179,7 +179,9 @@ impl EventBridge {
     fn emit(&self, event: EmbedEvent) {
         let callback = {
             let mut state = self.lock_state();
-            state.emitted_events.push(event.clone());
+            if let Some(emitted_events) = &mut state.emitted_events {
+                emitted_events.push(event.clone());
+            }
             state.callback.clone()
         };
 
@@ -196,7 +198,7 @@ impl EventBridge {
 #[derive(Default)]
 struct EventBridgeState {
     callback: Option<EventCallback>,
-    emitted_events: Vec<EmbedEvent>,
+    emitted_events: Option<Vec<EmbedEvent>>,
     tool_calls_executed: usize,
     had_errors: bool,
     terminal_emitted: bool,

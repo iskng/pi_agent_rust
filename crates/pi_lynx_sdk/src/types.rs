@@ -368,6 +368,8 @@ pub struct TurnRequest {
     pub prompt: String,
     /// Optional event callback.
     pub on_event: Option<Arc<dyn Fn(EmbedEvent) + Send + Sync>>,
+    /// Whether the turn should retain a copy of emitted events in memory.
+    pub capture_events: bool,
     /// Optional abort signal.
     pub abort_signal: Option<AbortSignal>,
 }
@@ -381,6 +383,8 @@ pub struct ContinueTurnRequest {
     pub transcript: Vec<HostTranscriptEntry>,
     /// Optional event callback.
     pub on_event: Option<Arc<dyn Fn(EmbedEvent) + Send + Sync>>,
+    /// Whether the turn should retain a copy of emitted events in memory.
+    pub capture_events: bool,
     /// Optional abort signal.
     pub abort_signal: Option<AbortSignal>,
 }

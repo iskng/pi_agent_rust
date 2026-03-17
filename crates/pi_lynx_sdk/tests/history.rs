@@ -150,6 +150,96 @@ fn reconstruct_history_rejects_transcript_ending_with_unresolved_tool_calls() {
     assert!(error.to_string().contains("call_1"));
 }
 
+/// WHY: Pi replays tool results in the original assistant tool-call order, so
+/// accepting a different persisted order would corrupt continuation context.
+#[test]
+fn reconstruct_history_rejects_out_of_order_multi_tool_results() {
+    let transcript = vec![
+        HostTranscriptEntry {
+            role: HostTranscriptRole::Assistant,
+            message_id: Some("a1".to_string()),
+            tool_call_id: None,
+            tool_name: None,
+            custom_type: None,
+            content: vec![
+                HostContentBlock::ToolCall {
+                    tool_call_id: "call_1".to_string(),
+                    tool_name: "read".to_string(),
+                    arguments: json!({ "path": "README.md" }),
+                },
+                HostContentBlock::ToolCall {
+                    tool_call_id: "call_2".to_string(),
+                    tool_name: "search".to_string(),
+                    arguments: json!({ "pattern": "lynx" }),
+                },
+            ],
+            is_error: false,
+            timestamp_ms: Some(1),
+        },
+        tool_result_entry("t2", "call_2", "search", "search output", 2),
+        tool_result_entry("t1", "call_1", "read", "read output", 3),
+    ];
+
+    let error =
+        reconstruct_history(&transcript).expect_err("out-of-order multi-tool replay must fail");
+
+    assert_eq!(error.kind(), pi_lynx_sdk::EmbedErrorKind::InvalidTranscript);
+    assert!(error.to_string().contains("out of order"));
+    assert!(error.to_string().contains("expected 'call_1'"));
+}
+
+/// WHY: provider tool-call ids are only stable within a single unresolved
+/// assistant tool-use batch, so hosts must be able to replay a later batch
+/// that reuses the same id after the earlier batch has fully resolved.
+#[test]
+fn reconstruct_history_allows_tool_call_id_reuse_after_resolved_batch() {
+    let transcript = vec![
+        assistant_tool_call_entry("a1", "call_1", "read", 1),
+        tool_result_entry("t1", "call_1", "read", "first output", 2),
+        HostTranscriptEntry {
+            role: HostTranscriptRole::Assistant,
+            message_id: Some("a2".to_string()),
+            tool_call_id: None,
+            tool_name: None,
+            custom_type: None,
+            content: vec![
+                HostContentBlock::Text {
+                    text: "checking again".to_string(),
+                },
+                HostContentBlock::ToolCall {
+                    tool_call_id: "call_1".to_string(),
+                    tool_name: "read".to_string(),
+                    arguments: json!({ "path": "Cargo.toml" }),
+                },
+            ],
+            is_error: false,
+            timestamp_ms: Some(3),
+        },
+        tool_result_entry("t2", "call_1", "read", "second output", 4),
+    ];
+
+    let result = reconstruct_history(&transcript).expect("reused tool_call_id must reconstruct");
+
+    assert_eq!(result.warnings.len(), 0);
+    assert_eq!(result.messages.len(), 4);
+    assert!(matches!(
+        &result.messages[1],
+        Message::ToolResult(message)
+            if message.tool_call_id == "call_1" && matches!(
+                message.content.as_slice(),
+                [ContentBlock::Text(text)] if text.text == "first output"
+            )
+    ));
+    assert!(matches!(
+        &result.messages[3],
+        Message::ToolResult(message)
+            if message.tool_call_id == "call_1" && matches!(
+                message.content.as_slice(),
+                [ContentBlock::Text(text)] if text.text == "second output"
+            )
+    ));
+}
+
 /// WHY: Pi custom messages are text-only, so the embed layer needs to preserve
 /// the text payload while warning when richer host-only blocks are dropped.
 #[test]

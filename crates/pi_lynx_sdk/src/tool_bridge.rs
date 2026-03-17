@@ -213,6 +213,14 @@ pub fn build_tool_registry(
     let mut tools: Vec<Box<dyn Tool>> = Vec::new();
 
     for adapter in host_tools {
+        if !policy.allows(adapter.kind()) {
+            tracing::debug!(
+                tool_kind = ?adapter.kind(),
+                "Skipping host tool because embed policy does not allow it"
+            );
+            continue;
+        }
+
         let definition = adapter.definition();
         validate_definition(&definition, adapter.kind())?;
 
@@ -221,15 +229,6 @@ pub fn build_tool_registry(
                 "tool_bridge::build_tool_registry",
                 format!("duplicate host tool name '{}'", definition.name),
             ));
-        }
-
-        if !policy.allows(adapter.kind()) {
-            tracing::debug!(
-                tool_name = %definition.name,
-                tool_kind = ?adapter.kind(),
-                "Skipping host tool because embed policy does not allow it"
-            );
-            continue;
         }
 
         tools.push(Box::new(HostToolWrapper {

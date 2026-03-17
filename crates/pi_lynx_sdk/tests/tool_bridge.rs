@@ -308,3 +308,52 @@ fn build_tool_registry_filters_tools_disallowed_by_policy() {
     assert!(registry.get("write").is_none());
     assert_eq!(registry.tools().len(), 1);
 }
+
+/// WHY: disabled tools should be invisible to registry assembly so hosts can
+/// keep a broader adapter pool without tripping validation on tools this turn
+/// does not actually expose.
+#[test]
+fn build_tool_registry_skips_disabled_tools_before_validation() {
+    let read: Arc<dyn HostToolAdapter> = Arc::new(RecordingTool {
+        kind: HostToolKind::Read,
+        definition: HostToolDefinition {
+            name: "read".to_string(),
+            label: "Read".to_string(),
+            description: "Read through host.".to_string(),
+            parameters: json!({ "type": "object" }),
+        },
+        requests: Arc::new(Mutex::new(Vec::new())),
+        updates: Vec::new(),
+        result: Ok(HostToolOutput {
+            content: Vec::new(),
+            details: None,
+            is_error: false,
+        }),
+    });
+    let disabled_write: Arc<dyn HostToolAdapter> = Arc::new(RecordingTool {
+        kind: HostToolKind::Write,
+        definition: HostToolDefinition {
+            name: "".to_string(),
+            label: "".to_string(),
+            description: "".to_string(),
+            parameters: json!("invalid"),
+        },
+        requests: Arc::new(Mutex::new(Vec::new())),
+        updates: Vec::new(),
+        result: Ok(HostToolOutput {
+            content: Vec::new(),
+            details: None,
+            is_error: false,
+        }),
+    });
+
+    let registry = build_tool_registry(
+        &ToolPolicy::default(),
+        &RuntimeMetadata::default(),
+        &[disabled_write, read],
+    )
+    .expect("disabled invalid tool should be skipped");
+
+    assert!(registry.get("read").is_some());
+    assert_eq!(registry.tools().len(), 1);
+}
