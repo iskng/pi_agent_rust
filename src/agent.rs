@@ -48,7 +48,7 @@ use futures::stream;
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::borrow::Cow;
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -366,15 +366,19 @@ impl AbortSignal {
     }
 
     pub async fn wait(&self) {
-        if self.is_aborted() {
-            return;
-        }
-
         loop {
-            self.inner.notify.notified().await;
             if self.is_aborted() {
                 return;
             }
+
+            let notified = self.inner.notify.notified();
+            futures::pin_mut!(notified);
+
+            if self.is_aborted() {
+                return;
+            }
+
+            notified.await;
         }
     }
 }
@@ -1661,56 +1665,52 @@ impl Agent {
         on_event: AgentEventHandler,
         abort: Option<AbortSignal>,
     ) -> (Vec<(usize, (ToolOutput, bool))>, BTreeSet<usize>) {
-        let started_indices = Arc::new(StdMutex::new(BTreeSet::new()));
-        let futures = batch.into_iter().map(|(idx, tc)| {
-            let on_event = Arc::clone(&on_event);
-            let started_indices = Arc::clone(&started_indices);
-            async move {
-                started_indices
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .insert(idx);
-                (idx, self.execute_tool_owned(tc, on_event).await)
-            }
-        });
+        let mut started_markers = BTreeMap::new();
+        let mut batch_items = Vec::with_capacity(batch.len());
+        for (idx, tool_call) in batch {
+            let execution_started = Arc::new(AtomicBool::new(false));
+            started_markers.insert(idx, Arc::clone(&execution_started));
+            batch_items.push((idx, tool_call, execution_started));
+        }
+
+        let futures = batch_items
+            .into_iter()
+            .map(|(idx, tool_call, execution_started)| {
+                let on_event = Arc::clone(&on_event);
+                async move {
+                    (
+                        idx,
+                        self.execute_tool_owned(tool_call, on_event, execution_started)
+                            .await,
+                    )
+                }
+            });
+
+        let mut buffered = stream::iter(futures)
+            .buffer_unordered(MAX_CONCURRENT_TOOLS)
+            .fuse();
+        let mut batch_results = Vec::new();
 
         if let Some(signal) = abort.as_ref() {
-            use futures::future::{Either, select};
-            let all_fut = stream::iter(futures)
-                .buffer_unordered(MAX_CONCURRENT_TOOLS)
-                .collect::<Vec<_>>()
-                .fuse();
             let abort_fut = signal.wait().fuse();
-            futures::pin_mut!(all_fut, abort_fut);
+            futures::pin_mut!(abort_fut);
 
-            match select(all_fut, abort_fut).await {
-                Either::Left((batch_results, _)) => (
-                    batch_results,
-                    started_indices
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .clone(),
-                ),
-                Either::Right(_) => (
-                    Vec::new(),
-                    started_indices
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .clone(),
-                ),
+            loop {
+                futures::select! {
+                    result = buffered.next() => match result {
+                        Some(result) => batch_results.push(result),
+                        None => break,
+                    },
+                    () = abort_fut => break,
+                }
             }
         } else {
-            (
-                stream::iter(futures)
-                    .buffer_unordered(MAX_CONCURRENT_TOOLS)
-                    .collect::<Vec<_>>()
-                    .await,
-                started_indices
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .clone(),
-            )
+            while let Some(result) = buffered.next().await {
+                batch_results.push(result);
+            }
         }
+
+        (batch_results, started_tool_indices(&started_markers))
     }
 
     #[allow(clippy::too_many_lines)]
@@ -1776,28 +1776,39 @@ impl Agent {
 
                 // Race tool execution against the abort signal so that a
                 // long-running (or hanging) tool is cancelled promptly.
-                tool_started[index] = true;
+                let execution_started = Arc::new(AtomicBool::new(false));
                 if let Some(signal) = abort.as_ref() {
                     use futures::future::{Either, select};
                     let tool_fut = self
-                        .execute_tool(tool_call.clone(), Arc::clone(&on_event))
+                        .execute_tool_with_started(
+                            tool_call.clone(),
+                            Arc::clone(&on_event),
+                            Arc::clone(&execution_started),
+                        )
                         .fuse();
                     let abort_fut = signal.wait().fuse();
                     futures::pin_mut!(tool_fut, abort_fut);
                     match select(tool_fut, abort_fut).await {
                         Either::Left((result, _)) => {
+                            tool_started[index] = execution_started.load(Ordering::SeqCst);
                             tool_outputs[index] = Some(result);
                         }
                         Either::Right(_) => {
                             // Abort fired — leave tool_outputs[index] as None
                             // so Phase 3 records it as aborted.
+                            tool_started[index] = execution_started.load(Ordering::SeqCst);
                             break;
                         }
                     }
                 } else {
                     let result = self
-                        .execute_tool(tool_call.clone(), Arc::clone(&on_event))
+                        .execute_tool_with_started(
+                            tool_call.clone(),
+                            Arc::clone(&on_event),
+                            Arc::clone(&execution_started),
+                        )
                         .await;
+                    tool_started[index] = execution_started.load(Ordering::SeqCst);
                     tool_outputs[index] = Some(result);
                 }
             }
@@ -1946,19 +1957,37 @@ impl Agent {
         tool_call: ToolCall,
         on_event: AgentEventHandler,
     ) -> (ToolOutput, bool) {
+        self.execute_tool_with_started(tool_call, on_event, Arc::new(AtomicBool::new(false)))
+            .await
+    }
+
+    async fn execute_tool_with_started(
+        &self,
+        tool_call: ToolCall,
+        on_event: AgentEventHandler,
+        execution_started: Arc<AtomicBool>,
+    ) -> (ToolOutput, bool) {
         let extensions = self.extensions.clone();
 
         let (mut output, is_error) = if let Some(extensions) = &extensions {
             match Self::dispatch_tool_call_hook(extensions, &tool_call).await {
                 Some(blocked_output) => (blocked_output, true),
                 None => {
-                    self.execute_tool_without_hooks(&tool_call, Arc::clone(&on_event))
-                        .await
+                    self.execute_tool_without_hooks(
+                        &tool_call,
+                        Arc::clone(&on_event),
+                        Arc::clone(&execution_started),
+                    )
+                    .await
                 }
             }
         } else {
-            self.execute_tool_without_hooks(&tool_call, Arc::clone(&on_event))
-                .await
+            self.execute_tool_without_hooks(
+                &tool_call,
+                Arc::clone(&on_event),
+                Arc::clone(&execution_started),
+            )
+            .await
         };
 
         if let Some(extensions) = &extensions {
@@ -1972,14 +2001,17 @@ impl Agent {
         &self,
         tool_call: ToolCall,
         on_event: AgentEventHandler,
+        execution_started: Arc<AtomicBool>,
     ) -> (ToolOutput, bool) {
-        self.execute_tool(tool_call, on_event).await
+        self.execute_tool_with_started(tool_call, on_event, execution_started)
+            .await
     }
 
     async fn execute_tool_without_hooks(
         &self,
         tool_call: &ToolCall,
         on_event: AgentEventHandler,
+        execution_started: Arc<AtomicBool>,
     ) -> (ToolOutput, bool) {
         // Find the tool
         let Some(tool) = self.tools.get(&tool_call.name) else {
@@ -1991,6 +2023,7 @@ impl Agent {
         let tool_args = tool_call.arguments.clone();
         let on_event = Arc::clone(&on_event);
 
+        execution_started.store(true, Ordering::SeqCst);
         on_event(AgentEvent::ToolExecutionStart {
             tool_call_id: tool_id.clone(),
             tool_name: tool_name.clone(),
@@ -3958,6 +3991,13 @@ mod extensions_integration_tests {
     }
 }
 
+fn started_tool_indices(started_markers: &BTreeMap<usize, Arc<AtomicBool>>) -> BTreeSet<usize> {
+    started_markers
+        .iter()
+        .filter_map(|(idx, started)| started.load(Ordering::SeqCst).then_some(*idx))
+        .collect()
+}
+
 #[cfg(test)]
 mod abort_tests {
     use super::*;
@@ -4224,6 +4264,249 @@ mod abort_tests {
         ) -> crate::error::Result<ToolOutput> {
             futures::future::pending::<()>().await;
             unreachable!("hanging tool should be aborted by the agent")
+        }
+    }
+
+    #[derive(Debug)]
+    struct ParallelReadOnlyToolCallProvider;
+
+    #[async_trait]
+    #[allow(clippy::unnecessary_literal_bound)]
+    impl Provider for ParallelReadOnlyToolCallProvider {
+        fn name(&self) -> &str {
+            "test-provider"
+        }
+
+        fn api(&self) -> &str {
+            "test-api"
+        }
+
+        fn model_id(&self) -> &str {
+            "test-model"
+        }
+
+        async fn stream(
+            &self,
+            _context: &Context<'_>,
+            _options: &StreamOptions,
+        ) -> crate::error::Result<
+            Pin<Box<dyn Stream<Item = crate::error::Result<StreamEvent>> + Send>>,
+        > {
+            let message = AssistantMessage {
+                content: vec![
+                    ContentBlock::ToolCall(ToolCall {
+                        id: "call-fast".to_string(),
+                        name: "fast_read_only".to_string(),
+                        arguments: json!({}),
+                        thought_signature: None,
+                    }),
+                    ContentBlock::ToolCall(ToolCall {
+                        id: "call-slow".to_string(),
+                        name: "slow_read_only".to_string(),
+                        arguments: json!({}),
+                        thought_signature: None,
+                    }),
+                ],
+                api: "test-api".to_string(),
+                provider: "test-provider".to_string(),
+                model: "test-model".to_string(),
+                usage: Usage::default(),
+                stop_reason: StopReason::ToolUse,
+                error_message: None,
+                timestamp: 0,
+            };
+
+            Ok(Box::pin(futures::stream::iter(vec![Ok(
+                StreamEvent::Done {
+                    reason: StopReason::ToolUse,
+                    message,
+                },
+            )])))
+        }
+    }
+
+    #[derive(Debug)]
+    struct DelayedHookToolCallProvider;
+
+    #[async_trait]
+    #[allow(clippy::unnecessary_literal_bound)]
+    impl Provider for DelayedHookToolCallProvider {
+        fn name(&self) -> &str {
+            "test-provider"
+        }
+
+        fn api(&self) -> &str {
+            "test-api"
+        }
+
+        fn model_id(&self) -> &str {
+            "test-model"
+        }
+
+        async fn stream(
+            &self,
+            _context: &Context<'_>,
+            _options: &StreamOptions,
+        ) -> crate::error::Result<
+            Pin<Box<dyn Stream<Item = crate::error::Result<StreamEvent>> + Send>>,
+        > {
+            let message = AssistantMessage {
+                content: vec![ContentBlock::ToolCall(ToolCall {
+                    id: "call-hook".to_string(),
+                    name: "count_tool".to_string(),
+                    arguments: json!({}),
+                    thought_signature: None,
+                })],
+                api: "test-api".to_string(),
+                provider: "test-provider".to_string(),
+                model: "test-model".to_string(),
+                usage: Usage::default(),
+                stop_reason: StopReason::ToolUse,
+                error_message: None,
+                timestamp: 0,
+            };
+
+            Ok(Box::pin(futures::stream::iter(vec![Ok(
+                StreamEvent::Done {
+                    reason: StopReason::ToolUse,
+                    message,
+                },
+            )])))
+        }
+    }
+
+    #[derive(Debug)]
+    struct FastReadOnlyTool {
+        completed: Arc<AtomicBool>,
+        ready: Arc<Notify>,
+    }
+
+    #[async_trait]
+    #[allow(clippy::unnecessary_literal_bound)]
+    impl Tool for FastReadOnlyTool {
+        fn name(&self) -> &str {
+            "fast_read_only"
+        }
+
+        fn label(&self) -> &str {
+            "Fast Read Only"
+        }
+
+        fn description(&self) -> &str {
+            "Completes before the batch abort fires"
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            json!({ "type": "object" })
+        }
+
+        fn is_read_only(&self) -> bool {
+            true
+        }
+
+        async fn execute(
+            &self,
+            _tool_call_id: &str,
+            _input: serde_json::Value,
+            _on_update: Option<Box<dyn Fn(ToolUpdate) + Send + Sync>>,
+        ) -> crate::error::Result<ToolOutput> {
+            self.completed.store(true, Ordering::SeqCst);
+            self.ready.notify_waiters();
+            Ok(ToolOutput {
+                content: vec![ContentBlock::Text(TextContent::new("fast result"))],
+                details: None,
+                is_error: false,
+            })
+        }
+    }
+
+    #[derive(Debug)]
+    struct SlowReadOnlyTool {
+        fast_completed: Arc<AtomicBool>,
+        fast_ready: Arc<Notify>,
+    }
+
+    #[async_trait]
+    #[allow(clippy::unnecessary_literal_bound)]
+    impl Tool for SlowReadOnlyTool {
+        fn name(&self) -> &str {
+            "slow_read_only"
+        }
+
+        fn label(&self) -> &str {
+            "Slow Read Only"
+        }
+
+        fn description(&self) -> &str {
+            "Waits for the fast tool, emits an update, then hangs"
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            json!({ "type": "object" })
+        }
+
+        fn is_read_only(&self) -> bool {
+            true
+        }
+
+        async fn execute(
+            &self,
+            _tool_call_id: &str,
+            _input: serde_json::Value,
+            on_update: Option<Box<dyn Fn(ToolUpdate) + Send + Sync>>,
+        ) -> crate::error::Result<ToolOutput> {
+            while !self.fast_completed.load(Ordering::SeqCst) {
+                self.fast_ready.notified().await;
+            }
+
+            if let Some(on_update) = on_update {
+                on_update(ToolUpdate {
+                    content: vec![ContentBlock::Text(TextContent::new("slow update"))],
+                    details: None,
+                });
+            }
+
+            futures::future::pending::<()>().await;
+            unreachable!("slow read-only tool should be aborted by the agent")
+        }
+    }
+
+    #[derive(Debug)]
+    struct CountingAbortWindowTool {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    #[allow(clippy::unnecessary_literal_bound)]
+    impl Tool for CountingAbortWindowTool {
+        fn name(&self) -> &str {
+            "count_tool"
+        }
+
+        fn label(&self) -> &str {
+            "Count Tool"
+        }
+
+        fn description(&self) -> &str {
+            "Tracks whether the adapter actually executed"
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            json!({ "type": "object" })
+        }
+
+        async fn execute(
+            &self,
+            _tool_call_id: &str,
+            _input: serde_json::Value,
+            _on_update: Option<Box<dyn Fn(ToolUpdate) + Send + Sync>>,
+        ) -> crate::error::Result<ToolOutput> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(ToolOutput {
+                content: vec![ContentBlock::Text(TextContent::new("ok"))],
+                details: None,
+                is_error: false,
+            })
         }
     }
 
@@ -4666,6 +4949,172 @@ mod abort_tests {
                 "missing aborted tool marker in tool output: {:?}",
                 tool_result.content
             );
+        });
+    }
+
+    /// WHY: aborting a parallel read-only batch must preserve outputs from
+    /// tools that finished before the abort fired instead of rewriting them as
+    /// synthetic aborted results.
+    #[test]
+    fn abort_during_parallel_read_only_batch_preserves_completed_outputs() {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime build");
+
+        runtime.block_on(async move {
+            let fast_completed = Arc::new(AtomicBool::new(false));
+            let fast_ready = Arc::new(Notify::new());
+            let provider = Arc::new(ParallelReadOnlyToolCallProvider);
+            let tools = ToolRegistry::from_tools(vec![
+                Box::new(FastReadOnlyTool {
+                    completed: Arc::clone(&fast_completed),
+                    ready: Arc::clone(&fast_ready),
+                }),
+                Box::new(SlowReadOnlyTool {
+                    fast_completed,
+                    fast_ready,
+                }),
+            ]);
+            let agent = Agent::new(provider, tools, AgentConfig::default());
+            let session = Arc::new(Mutex::new(Session::in_memory()));
+            let mut agent_session = AgentSession::new(
+                agent,
+                Arc::clone(&session),
+                false,
+                ResolvedCompactionSettings::default(),
+            );
+
+            let (abort_handle, abort_signal) = AbortHandle::new();
+            let result = agent_session
+                .run_text_with_abort("trigger tools".to_string(), Some(abort_signal), move |event| {
+                    if matches!(
+                        event,
+                        AgentEvent::ToolExecutionUpdate { tool_call_id, .. } if tool_call_id == "call-slow"
+                    ) {
+                        abort_handle.abort();
+                    }
+                })
+                .await
+                .expect("parallel abort run");
+            assert_eq!(result.stop_reason, StopReason::Aborted);
+
+            let cx = crate::agent_cx::AgentCx::for_request();
+            let persisted = session
+                .lock(cx.cx())
+                .await
+                .expect("lock session")
+                .to_messages_for_current_path();
+
+            let tool_results = persisted
+                .iter()
+                .filter_map(|message| match message {
+                    Message::ToolResult(result) => Some(Arc::clone(result)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(tool_results.len(), 2, "expected two tool results: {persisted:?}");
+            assert_eq!(tool_results[0].tool_call_id, "call-fast");
+            assert!(!tool_results[0].is_error);
+            assert!(matches!(
+                tool_results[0].content.as_slice(),
+                [ContentBlock::Text(text)] if text.text == "fast result"
+            ));
+            assert_eq!(tool_results[1].tool_call_id, "call-slow");
+            assert!(tool_results[1].is_error);
+            assert!(tool_results[1].content.iter().any(|block| matches!(
+                block,
+                ContentBlock::Text(text) if text.text.contains("Tool execution aborted")
+            )));
+        });
+    }
+
+    /// WHY: aborts that land while extension hooks are still running must not
+    /// claim the host tool adapter executed before `ToolExecutionStart`.
+    #[test]
+    fn abort_during_tool_call_hook_keeps_executed_false_until_adapter_entry() {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime build");
+
+        runtime.block_on(async move {
+            let temp_dir = tempfile::tempdir().expect("tempdir");
+            let entry_path = temp_dir.path().join("ext.mjs");
+            std::fs::write(
+                &entry_path,
+                r#"
+                export default function init(pi) {
+                  pi.on("tool_call", async (_event) => {
+                    await new Promise((resolve) => setTimeout(resolve, 200));
+                    return {};
+                  });
+                }
+                "#,
+            )
+            .expect("write extension entry");
+
+            let provider = Arc::new(DelayedHookToolCallProvider);
+            let calls = Arc::new(AtomicUsize::new(0));
+            let tools = ToolRegistry::from_tools(vec![Box::new(CountingAbortWindowTool {
+                calls: Arc::clone(&calls),
+            })]);
+            let agent = Agent::new(provider, tools, AgentConfig::default());
+            let session = Arc::new(Mutex::new(Session::in_memory()));
+            let mut agent_session = AgentSession::new(
+                agent,
+                Arc::clone(&session),
+                false,
+                ResolvedCompactionSettings::default(),
+            );
+
+            agent_session
+                .enable_extensions(&[], temp_dir.path(), None, &[entry_path])
+                .await
+                .expect("enable extensions");
+
+            let events = Arc::new(StdMutex::new(Vec::new()));
+            let (abort_handle, abort_signal) = AbortHandle::new();
+            let result = agent_session
+                .run_text_with_abort("trigger hook abort".to_string(), Some(abort_signal), {
+                    let events = Arc::clone(&events);
+                    move |event| {
+                        if matches!(
+                            &event,
+                            AgentEvent::MessageEnd {
+                                message: Message::Assistant(assistant),
+                            } if assistant.stop_reason == StopReason::ToolUse
+                        ) {
+                            abort_handle.abort();
+                        }
+                        events
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .push(event);
+                    }
+                })
+                .await
+                .expect("hook abort run");
+
+            assert_eq!(result.stop_reason, StopReason::Aborted);
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+            let events = events
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            assert!(
+                !events
+                    .iter()
+                    .any(|event| matches!(event, AgentEvent::ToolExecutionStart { .. })),
+                "tool adapter should not have started: {events:?}"
+            );
+            assert!(events.iter().any(|event| matches!(
+                event,
+                AgentEvent::ToolExecutionEnd {
+                    tool_call_id,
+                    executed: false,
+                    ..
+                } if tool_call_id == "call-hook"
+            )));
         });
     }
 }
