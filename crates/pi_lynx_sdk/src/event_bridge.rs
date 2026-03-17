@@ -142,10 +142,13 @@ impl EventBridge {
                 tool_call_id,
                 tool_name,
                 is_error,
+                executed,
                 ..
             } => {
                 let mut state = self.lock_state();
-                state.tool_calls_executed += 1;
+                if executed {
+                    state.tool_calls_executed += 1;
+                }
                 state.had_errors |= is_error;
                 drop(state);
                 self.emit(EmbedEvent::ToolCompleted {

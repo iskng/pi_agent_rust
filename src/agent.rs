@@ -48,7 +48,7 @@ use futures::stream;
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::borrow::Cow;
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -272,6 +272,7 @@ pub enum AgentEvent {
         result: ToolOutput,
         #[serde(rename = "isError")]
         is_error: bool,
+        executed: bool,
     },
     /// Auto-compaction lifecycle start.
     AutoCompactionStart { reason: String },
@@ -1659,10 +1660,18 @@ impl Agent {
         batch: Vec<(usize, ToolCall)>,
         on_event: AgentEventHandler,
         abort: Option<AbortSignal>,
-    ) -> Vec<(usize, (ToolOutput, bool))> {
+    ) -> (Vec<(usize, (ToolOutput, bool))>, BTreeSet<usize>) {
+        let started_indices = Arc::new(StdMutex::new(BTreeSet::new()));
         let futures = batch.into_iter().map(|(idx, tc)| {
             let on_event = Arc::clone(&on_event);
-            async move { (idx, self.execute_tool_owned(tc, on_event).await) }
+            let started_indices = Arc::clone(&started_indices);
+            async move {
+                started_indices
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(idx);
+                (idx, self.execute_tool_owned(tc, on_event).await)
+            }
         });
 
         if let Some(signal) = abort.as_ref() {
@@ -1675,14 +1684,32 @@ impl Agent {
             futures::pin_mut!(all_fut, abort_fut);
 
             match select(all_fut, abort_fut).await {
-                Either::Left((batch_results, _)) => batch_results,
-                Either::Right(_) => Vec::new(), // Aborted
+                Either::Left((batch_results, _)) => (
+                    batch_results,
+                    started_indices
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .clone(),
+                ),
+                Either::Right(_) => (
+                    Vec::new(),
+                    started_indices
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .clone(),
+                ),
             }
         } else {
-            stream::iter(futures)
-                .buffer_unordered(MAX_CONCURRENT_TOOLS)
-                .collect::<Vec<_>>()
-                .await
+            (
+                stream::iter(futures)
+                    .buffer_unordered(MAX_CONCURRENT_TOOLS)
+                    .collect::<Vec<_>>()
+                    .await,
+                started_indices
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone(),
+            )
         }
     }
 
@@ -1709,6 +1736,7 @@ impl Agent {
         // Phase 2: Execute tools with safety barriers.
         let mut pending_parallel: Vec<(usize, ToolCall)> = Vec::new();
         let mut tool_outputs: Vec<Option<(ToolOutput, bool)>> = vec![None; tool_calls.len()];
+        let mut tool_started = vec![false; tool_calls.len()];
 
         // Iterate through tools. If read-only, buffer. If unsafe, flush buffer then run unsafe.
         for (index, tool_call) in tool_calls.iter().enumerate() {
@@ -1732,9 +1760,12 @@ impl Agent {
                 // Barrier: flush parallel buffer first
                 if !pending_parallel.is_empty() {
                     let batch = std::mem::take(&mut pending_parallel);
-                    let results = self
+                    let (results, started_indices) = self
                         .execute_parallel_batch(batch, Arc::clone(&on_event), abort.clone())
                         .await;
+                    for idx in started_indices {
+                        tool_started[idx] = true;
+                    }
                     for (idx, result) in results {
                         tool_outputs[idx] = Some(result);
                     }
@@ -1754,6 +1785,7 @@ impl Agent {
 
                 // Race tool execution against the abort signal so that a
                 // long-running (or hanging) tool is cancelled promptly.
+                tool_started[index] = true;
                 if let Some(signal) = abort.as_ref() {
                     use futures::future::{Either, select};
                     let tool_fut = self
@@ -1789,9 +1821,12 @@ impl Agent {
             // Check steering one last time before final flush
             let steering = self.drain_steering_messages().await;
             if steering.is_empty() {
-                let results = self
+                let (results, started_indices) = self
                     .execute_parallel_batch(batch, Arc::clone(&on_event), abort.clone())
                     .await;
+                for idx in started_indices {
+                    tool_started[idx] = true;
+                }
                 for (idx, result) in results {
                     tool_outputs[idx] = Some(result);
                 }
@@ -1839,6 +1874,7 @@ impl Agent {
                         is_error,
                     },
                     is_error,
+                    executed: true,
                 });
 
                 let msg = Message::ToolResult(Arc::clone(&tool_result));
@@ -1883,6 +1919,7 @@ impl Agent {
                         is_error: true,
                     },
                     is_error: true,
+                    executed: tool_started[index],
                 });
 
                 let tool_result = Arc::new(ToolResultMessage {
@@ -2092,6 +2129,7 @@ impl Agent {
             tool_name: tool_call.name.clone(),
             result: output.clone(),
             is_error: true,
+            executed: false,
         });
 
         let tool_result = Arc::new(ToolResultMessage {

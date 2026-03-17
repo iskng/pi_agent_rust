@@ -237,7 +237,8 @@ Fields:
 
 - `provider_id: String`
 - `model_id: String`
-- `tool_calls_executed: usize`
+- `tool_calls_executed: usize` (count only tool calls that actually entered
+  host adapter execution; exclude synthetic aborted/skipped completions)
 - `had_errors: bool`
 - `aborted: bool`
 - `session_mode: SessionMode`

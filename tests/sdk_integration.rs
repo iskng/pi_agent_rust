@@ -980,6 +980,7 @@ fn sdk_conformance_agent_event_json_schema() {
                 is_error: false,
             },
             is_error: false,
+            executed: true,
         },
         AgentEvent::AgentEnd {
             session_id: "s1".into(),

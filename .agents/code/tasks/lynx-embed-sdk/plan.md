@@ -38,6 +38,7 @@ Added focused `history` and `runtime_turn` nextest coverage for unresolved parti
 
 - [x] [P1][M][T13] Enforce tool-result replay order within a single assistant tool-use batch so reconstructed multi-tool transcripts match the sequential replay order Pi uses during `Agent::execute_tool_calls(...)`
 - [x] [P1][M][T14] Make embed event capture explicitly opt-in per turn so callback-only hosts do not retain duplicated provider and tool streams in memory
+- [x] [P2][S][T15] Distinguish started host tool executions from synthetic aborted/skipped completions so `tool_calls_executed` only counts tools that actually entered adapter execution
 
 ## Session 5
 
@@ -48,3 +49,8 @@ Validated the completed embed crate with `cargo fmt --check`, `cargo check -p pi
 
 Closed the remaining review regressions by scoping transcript tool-call tracking to the active unresolved assistant batch so `tool_call_id` values can be reused after a prior batch fully resolves, and by skipping policy-disabled host tools before registry validation so inactive adapters cannot fail embed bootstrap.
 Validated the fixes with `cargo fmt --check`, `cargo check -p pi_lynx_sdk --all-targets`, `cargo clippy -p pi_lynx_sdk --all-targets --no-deps -- -D warnings`, `cargo nextest run -p pi_lynx_sdk --test history --test tool_bridge`, and `cargo nextest run -p pi_lynx_sdk`; resolved `mung` issues `1773706520-82145-0` and `1773706520-82148-0`.
+
+## Session 7
+
+Closed the last open review issue by threading an explicit started/executed bit through `AgentEvent::ToolExecutionEnd`, tracking tool-adapter entry separately from synthetic aborted/skipped completions, and teaching the Lynx embed bridge to count only actually started host tools.
+Validated the fix with `cargo fmt --check`, `cargo check --all-targets`, `cargo nextest run -p pi_lynx_sdk --test runtime_turn`, `cargo nextest run --test json_mode_parity json_parity_tool_execution_end_schema`, and `cargo nextest run --test sdk_integration sdk_conformance_agent_event_json_schema`; `cargo clippy --all-targets -- -D warnings` is still blocked by unrelated pre-existing warnings in `src/extensions.rs`, `src/extensions_js.rs`, `src/interactive/*`, `src/providers/bedrock.rs`, `src/session*.rs`, and `src/sse.rs`.

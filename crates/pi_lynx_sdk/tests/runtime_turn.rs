@@ -61,6 +61,10 @@ enum ProviderStep {
         expected_messages: usize,
         text: &'static str,
     },
+    ToolCalls {
+        expected_messages: usize,
+        tool_calls: Vec<(&'static str, &'static str, Value)>,
+    },
     ToolCall {
         expected_messages: usize,
         tool_call_id: &'static str,
@@ -97,6 +101,13 @@ impl ProviderStep {
             } => {
                 assert_eq!(observed_messages, expected_messages);
                 Ok(Box::pin(stream::iter(text_events(text))))
+            }
+            Self::ToolCalls {
+                expected_messages,
+                tool_calls,
+            } => {
+                assert_eq!(observed_messages, expected_messages);
+                Ok(Box::pin(stream::iter(multi_tool_call_events(tool_calls))))
             }
             Self::ToolCall {
                 expected_messages,
@@ -211,6 +222,52 @@ impl HostToolAdapter for HangingTool {
         _request: HostToolRequest,
         _on_update: Option<Box<dyn Fn(pi_lynx_sdk::HostToolUpdate) + Send + Sync>>,
     ) -> std::result::Result<HostToolOutput, HostToolError> {
+        futures::future::pending::<()>().await;
+        Ok(HostToolOutput {
+            content: Vec::new(),
+            details: None,
+            is_error: false,
+        })
+    }
+}
+
+#[derive(Debug)]
+struct UpdatingHangingExecTool;
+
+#[async_trait]
+impl HostToolAdapter for UpdatingHangingExecTool {
+    fn kind(&self) -> HostToolKind {
+        HostToolKind::Exec
+    }
+
+    fn definition(&self) -> HostToolDefinition {
+        HostToolDefinition {
+            name: "bash".to_string(),
+            label: "Bash".to_string(),
+            description: "Execute through the host.".to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "command": { "type": "string" }
+                }
+            }),
+        }
+    }
+
+    async fn execute(
+        &self,
+        _request: HostToolRequest,
+        on_update: Option<Box<dyn Fn(pi_lynx_sdk::HostToolUpdate) + Send + Sync>>,
+    ) -> std::result::Result<HostToolOutput, HostToolError> {
+        if let Some(on_update) = on_update {
+            on_update(pi_lynx_sdk::HostToolUpdate {
+                content: vec![ContentBlock::Text(TextContent::new(
+                    "entered host exec adapter",
+                ))],
+                details: None,
+            });
+        }
+
         futures::future::pending::<()>().await;
         Ok(HostToolOutput {
             content: Vec::new(),
@@ -600,9 +657,67 @@ fn runtime_handles_tool_failures_and_abort_paths() {
 
         assert_eq!(tool_abort_result.stop_reason, Some(StopReason::Aborted));
         assert!(tool_abort_result.result_metadata.aborted);
-        assert_eq!(tool_abort_result.result_metadata.tool_calls_executed, 1);
+        assert_eq!(tool_abort_result.result_metadata.tool_calls_executed, 0);
         assert!(tool_abort_result.result_metadata.had_errors);
         assert!(tool_abort_result.emitted_events.is_none());
+    });
+}
+
+/// WHY: interrupted multi-tool batches must count only host tools that
+/// actually entered adapter execution, excluding later synthetic abort ends.
+#[test]
+fn runtime_counts_only_started_tools_in_aborted_multi_tool_batches() {
+    let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+        .build()
+        .expect("runtime");
+
+    runtime.block_on(async {
+        let (abort_handle, abort_signal) = AbortHandle::new();
+        let tool_registry = pi_lynx_sdk::build_tool_registry(
+            &ToolPolicy {
+                allowed_tools: vec![HostToolKind::Exec],
+                allow_mutations: false,
+                allow_exec: true,
+            },
+            &RuntimeMetadata::default(),
+            &[Arc::new(UpdatingHangingExecTool) as Arc<dyn HostToolAdapter>],
+        )
+        .expect("tool registry");
+        let provider = Arc::new(ScriptedProvider {
+            steps: Mutex::new(VecDeque::from([ProviderStep::ToolCalls {
+                expected_messages: 1,
+                tool_calls: vec![
+                    ("call_1", "bash", json!({ "command": "sleep 10" })),
+                    ("call_2", "bash", json!({ "command": "echo never" })),
+                ],
+            }])),
+        });
+
+        let result = run_turn_with_artifacts(
+            TurnRequest {
+                config: sample_config(),
+                transcript: Vec::new(),
+                prompt: "run both commands".to_string(),
+                on_event: Some(Arc::new(move |event| {
+                    if matches!(
+                        event,
+                        EmbedEvent::ToolUpdate { tool_call_id, .. } if tool_call_id == "call_1"
+                    ) {
+                        abort_handle.abort();
+                    }
+                })),
+                capture_events: true,
+                abort_signal: Some(abort_signal),
+            },
+            bootstrap_artifacts(provider, tool_registry, Vec::new()),
+        )
+        .await
+        .expect("abort during multi-tool execution returns partial result");
+
+        assert_eq!(result.stop_reason, Some(StopReason::Aborted));
+        assert!(result.result_metadata.aborted);
+        assert_eq!(result.result_metadata.tool_calls_executed, 1);
+        assert!(result.result_metadata.had_errors);
     });
 }
 
@@ -867,4 +982,43 @@ fn tool_call_events(
             message,
         }),
     ]
+}
+
+fn multi_tool_call_events(
+    tool_calls: Vec<(&str, &str, Value)>,
+) -> Vec<pi::error::Result<StreamEvent>> {
+    let tool_calls = tool_calls
+        .into_iter()
+        .map(|(tool_call_id, tool_name, arguments)| ToolCall {
+            id: tool_call_id.to_string(),
+            name: tool_name.to_string(),
+            arguments,
+            thought_signature: None,
+        })
+        .collect::<Vec<_>>();
+    let message = assistant_message(
+        tool_calls
+            .iter()
+            .cloned()
+            .map(ContentBlock::ToolCall)
+            .collect(),
+        StopReason::ToolUse,
+        None,
+    );
+
+    let mut events = vec![Ok(StreamEvent::Start {
+        partial: assistant_message(Vec::new(), StopReason::ToolUse, None),
+    })];
+    for (content_index, tool_call) in tool_calls.into_iter().enumerate() {
+        events.push(Ok(StreamEvent::ToolCallStart { content_index }));
+        events.push(Ok(StreamEvent::ToolCallEnd {
+            content_index,
+            tool_call,
+        }));
+    }
+    events.push(Ok(StreamEvent::Done {
+        reason: StopReason::ToolUse,
+        message,
+    }));
+    events
 }

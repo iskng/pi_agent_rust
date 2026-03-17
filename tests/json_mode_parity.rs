@@ -385,6 +385,7 @@ fn json_parity_tool_execution_end_schema() {
         tool_name: "read".to_string(),
         result: test_tool_output(),
         is_error: false,
+        executed: true,
     };
     let json = event_to_json(&event);
 
@@ -393,7 +394,9 @@ fn json_parity_tool_execution_end_schema() {
     assert_non_empty_string(&json, "toolName");
     assert_has_field(&json, "result");
     assert_has_field(&json, "isError");
+    assert_has_field(&json, "executed");
     assert_eq!(json["isError"], false);
+    assert_eq!(json["executed"], true);
 
     // Verify camelCase
     assert!(json.get("is_error").is_none());
@@ -408,6 +411,7 @@ fn json_parity_tool_execution_end_schema() {
             is_error: true,
         },
         is_error: true,
+        executed: true,
     };
     let json_err = event_to_json(&event_err);
     assert_eq!(json_err["isError"], true);
@@ -897,6 +901,7 @@ fn json_parity_no_snake_case_leak() {
             tool_name: "read".to_string(),
             result: test_tool_output(),
             is_error: false,
+            executed: true,
         },
         AgentEvent::AutoCompactionStart {
             reason: "r".to_string(),
@@ -1096,6 +1101,7 @@ fn json_parity_all_event_type_strings() {
                 tool_name: "r".to_string(),
                 result: test_tool_output(),
                 is_error: false,
+                executed: true,
             },
             "tool_execution_end",
         ),
@@ -1728,6 +1734,7 @@ fn json_parity_complete_lifecycle_with_extension_ui() {
         tool_name: "bash".to_string(),
         result: test_tool_output(),
         is_error: false,
+        executed: true,
     });
     let ui_req = ExtensionUiRequest::new(
         "ui-1",
@@ -1841,6 +1848,7 @@ fn json_parity_extension_event_from_agent_mapping() {
                 tool_name: "read".to_string(),
                 result: test_tool_output(),
                 is_error: false,
+                executed: true,
             },
             ExtensionEventName::ToolExecutionEnd,
         ),
@@ -1987,6 +1995,7 @@ fn json_parity_tool_execution_extension_tool() {
             is_error: true,
         },
         is_error: true,
+        executed: true,
     };
     let json_end = event_to_json(&event_end);
     assert_eq!(json_end["isError"], true);
@@ -2021,6 +2030,7 @@ fn json_parity_tool_error_consistency() {
             is_error: true,
         },
         is_error: true,
+        executed: true,
     };
     let json = event_to_json(&event);
     assert_eq!(json["isError"], true, "top-level isError");
@@ -2069,6 +2079,7 @@ fn json_parity_tool_result_no_details() {
             is_error: false,
         },
         is_error: false,
+        executed: true,
     };
     let json = event_to_json(&event);
     // Pi-mono: write tool has details: undefined → null in JSON.
@@ -2326,6 +2337,7 @@ fn json_parity_tool_details_rich_data() {
             is_error: false,
         },
         is_error: false,
+        executed: true,
     };
     let json = event_to_json(&event);
     let details = &json["result"]["details"];
@@ -2346,6 +2358,7 @@ fn json_parity_tool_details_rich_data() {
             is_error: false,
         },
         is_error: false,
+        executed: true,
     };
     let json_read = event_to_json(&event_read);
     assert_eq!(json_read["result"]["details"]["size"], 1024);
@@ -2390,6 +2403,7 @@ fn json_parity_tool_lifecycle_ordering() {
                 is_error: false,
             },
             is_error: false,
+            executed: true,
         },
     ];
 
@@ -2446,6 +2460,7 @@ fn json_parity_empty_text_content() {
             is_error: false,
         },
         is_error: false,
+        executed: true,
     };
     let json = event_to_json(&event);
 
@@ -2486,6 +2501,7 @@ fn json_parity_unicode_content() {
                 is_error: false,
             },
             is_error: false,
+            executed: true,
         };
         let json = event_to_json(&event);
         let content = &json["result"]["content"][0]["text"];
@@ -2564,6 +2580,7 @@ fn json_parity_tool_output_multiple_content_blocks() {
             is_error: false,
         },
         is_error: false,
+        executed: true,
     };
     let json = event_to_json(&event);
 
@@ -2602,6 +2619,7 @@ fn json_parity_tool_output_empty_content() {
             is_error: false,
         },
         is_error: false,
+        executed: true,
     };
     let json = event_to_json(&event);
 
@@ -3367,6 +3385,7 @@ fn json_parity_full_lifecycle_with_tool_turn() {
                 is_error: false,
             },
             is_error: false,
+            executed: true,
         },
         // Turn end with tool results.
         AgentEvent::TurnEnd {
@@ -3706,6 +3725,7 @@ fn json_parity_ndjson_single_line() {
                 is_error: false,
             },
             is_error: false,
+            executed: true,
         },
         // Tab and carriage return in delta.
         AgentEvent::MessageUpdate {
@@ -3899,6 +3919,7 @@ fn json_parity_extension_event_payload_all_forwarded() {
                 tool_name: "read".to_string(),
                 result: test_tool_output(),
                 is_error: false,
+                executed: true,
             },
             "toolCallId",
         ),
@@ -4009,6 +4030,7 @@ fn json_parity_tool_details_edge_cases() {
                 is_error: false,
             },
             is_error: false,
+            executed: true,
         };
         let json = event_to_json(&event);
         let result = &json["result"];
@@ -4093,6 +4115,7 @@ fn json_parity_multi_tool_turn() {
             tool_name: name.to_string(),
             result: test_tool_output(),
             is_error: false,
+            executed: true,
         }));
     }
 

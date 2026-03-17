@@ -412,7 +412,7 @@ pub struct TurnResultMetadata {
     pub provider_id: String,
     /// Model used for the turn.
     pub model_id: String,
-    /// Number of host tools executed during the turn.
+    /// Number of host tools that actually entered adapter execution.
     pub tool_calls_executed: usize,
     /// Whether any errors were observed during the turn.
     pub had_errors: bool,
