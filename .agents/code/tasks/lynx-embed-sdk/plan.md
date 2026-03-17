@@ -61,6 +61,7 @@ Validated the fix with `cargo fmt --check`, `cargo check --all-targets`, `cargo 
 - [x] [P1][M][T17] Stop translating synthetic skipped/aborted `AgentEvent::ToolExecutionStart`/`ToolExecutionEnd` pairs into normal embed tool lifecycle events, or thread explicit execution state through `EmbedEvent` so hosts can distinguish queued tool proposals from host adapters that actually started
 - [x] [P1][M][T18] Stop marking normal tool-result completions as `executed: true` when the adapter never started, so missing-tool and extension-blocked failures remain excluded from Lynx `tool_calls_executed` metadata
 - [x] [P1][M][T19] Replace `execute_parallel_batch()`'s `buffer_unordered()` abort race with explicit in-flight scheduling so ready read-only tool results are drained without launching new work after abort
+- [x] [P2][S][T20] Clear resolved transcript tool-call tracking before custom transcript entries so reused `tool_call_id` values remain valid across fully replayed custom-message boundaries
 
 ## Session 8
 
@@ -76,3 +77,8 @@ Also fixed a related lost-wake bug in `AbortSignal::wait()` that could hang same
 
 Closed the last two open `mung` review issues by threading the precomputed `tool_started[index]` bit through the normal `ToolExecutionEnd` path and by replacing the read-only batch `buffer_unordered()` loop with explicit `FuturesUnordered` scheduling that drains only already-running ready results after abort.
 Added focused root regressions for missing-tool completions and simultaneous ready-result/abort races, validated with `cargo fmt --check`, `cargo check --all-targets`, `cargo nextest run --lib abort_during_parallel_read_only_batch_preserves_completed_outputs parallel_batch_prioritizes_ready_results_when_abort_is_also_ready abort_during_tool_call_hook_keeps_executed_false_until_adapter_entry missing_tool_failure_keeps_executed_false_without_start_event --status-level all --test-threads=1`, and `cargo nextest run -p pi_lynx_sdk runtime_counts_only_started_tools_in_aborted_multi_tool_batches --status-level all --test-threads=1`; `cargo clippy --all-targets -- -D warnings` is still blocked by unrelated pre-existing warnings in `src/extensions.rs`, `src/extensions_js.rs`, `src/interactive/*`, `src/providers/bedrock.rs`, `src/rpc.rs`, `src/scheduler.rs`, `src/session*.rs`, and `src/sse.rs`.
+
+## Session 11
+
+Closed the remaining open `lynx-embed-sdk` review issue by clearing resolved tool-batch state before reconstructing custom transcript entries, which restores valid `tool_call_id` reuse across `assistant -> tool result -> custom -> assistant` transcript boundaries.
+Validated with `cargo fmt --all --check`, `cargo check -p pi_lynx_sdk --all-targets`, `cargo clippy -p pi_lynx_sdk --all-targets --no-deps -- -D warnings`, and `cargo nextest run -p pi_lynx_sdk --test history`; the new regression covers reused tool-call ids across a custom message boundary.

@@ -169,6 +169,11 @@ expected '{pending_tool_call_id}' next to match the assistant tool-call replay o
             }
             HostTranscriptRole::Custom => {
                 ensure_no_pending_tool_calls(entry, &pending_tool_calls)?;
+                clear_resolved_tool_batch(
+                    &pending_tool_calls,
+                    &mut active_tool_calls,
+                    &mut completed_tool_calls,
+                );
                 let mut text_fragments = Vec::new();
                 for block in &entry.content {
                     match block {

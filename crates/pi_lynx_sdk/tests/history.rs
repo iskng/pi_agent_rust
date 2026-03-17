@@ -240,6 +240,49 @@ fn reconstruct_history_allows_tool_call_id_reuse_after_resolved_batch() {
     ));
 }
 
+/// WHY: custom transcript entries are valid boundaries between resolved tool
+/// batches, so they must not keep old tool-call ids alive and poison later
+/// assistant replay with false duplicate-id failures.
+#[test]
+fn reconstruct_history_allows_tool_call_id_reuse_after_custom_entry() {
+    let transcript = vec![
+        assistant_tool_call_entry("a1", "call_1", "read", 1),
+        tool_result_entry("t1", "call_1", "read", "first output", 2),
+        HostTranscriptEntry {
+            role: HostTranscriptRole::Custom,
+            message_id: Some("c1".to_string()),
+            tool_call_id: None,
+            tool_name: None,
+            custom_type: Some("lynx_note".to_string()),
+            content: vec![HostContentBlock::Text {
+                text: "checkpoint".to_string(),
+            }],
+            is_error: false,
+            timestamp_ms: Some(3),
+        },
+        assistant_tool_call_entry("a2", "call_1", "read", 4),
+        tool_result_entry("t2", "call_1", "read", "second output", 5),
+    ];
+
+    let result = reconstruct_history(&transcript)
+        .expect("reused tool_call_id after custom entry must reconstruct");
+
+    assert_eq!(result.warnings.len(), 0);
+    assert_eq!(result.messages.len(), 5);
+    assert!(matches!(
+        &result.messages[2],
+        Message::Custom(message) if message.content == "checkpoint" && message.custom_type == "lynx_note"
+    ));
+    assert!(matches!(
+        &result.messages[4],
+        Message::ToolResult(message)
+            if message.tool_call_id == "call_1" && matches!(
+                message.content.as_slice(),
+                [ContentBlock::Text(text)] if text.text == "second output"
+            )
+    ));
+}
+
 /// WHY: Pi custom messages are text-only, so the embed layer needs to preserve
 /// the text payload while warning when richer host-only blocks are dropped.
 #[test]
