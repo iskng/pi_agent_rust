@@ -222,6 +222,7 @@ Fields:
 - `stop_reason: Option<StopReason>`
 - `usage: Option<Usage>`
 - `emitted_events: Option<Vec<EmbedEvent>>`
+- `history_warnings: Vec<HistoryWarning>`
 - `result_metadata: TurnResultMetadata`
 
 Purpose:
@@ -253,8 +254,10 @@ Initial variants:
 - `MessageDelta { text: String }`
 - `MessageCompleted { message: crate::model::Message }`
 - `ToolStarted { tool_call_id: String, tool_name: String, args: serde_json::Value }`
+  - emitted when a host adapter actually enters execution, not when the model merely proposed a tool call
 - `ToolUpdate { tool_call_id: String, update: ToolUpdatePayload }`
-- `ToolCompleted { tool_call_id: String, tool_name: String, is_error: bool }`
+- `ToolCompleted { tool_call_id: String, tool_name: String, is_error: bool, executed: bool }`
+  - `executed = false` indicates a synthetic aborted/skipped completion that never entered host adapter execution
 - `ProviderEvent { event: crate::model::StreamEvent }`
 - `TurnCompleted`
 - `TurnFailed { error: EmbedErrorKind }`

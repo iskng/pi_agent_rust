@@ -112,7 +112,7 @@ async fn execute_turn(
         agent_config,
         provider,
         history,
-        history_warnings: _history_warnings,
+        history_warnings,
     } = artifacts;
 
     let provider_id = provider.name().to_string();
@@ -155,6 +155,7 @@ async fn execute_turn(
         &provider_id,
         &model_id,
         &session_id,
+        history_warnings,
         assistant,
     )
 }
@@ -165,6 +166,7 @@ fn finalize_success(
     provider_id: &str,
     model_id: &str,
     session_id: &str,
+    history_warnings: Vec<crate::types::HistoryWarning>,
     assistant_message: AssistantMessage,
 ) -> Result<TurnResult> {
     match assistant_message.stop_reason {
@@ -215,6 +217,7 @@ fn finalize_success(
         stop_reason: Some(assistant_message.stop_reason),
         usage: Some(assistant_message.usage.clone()),
         emitted_events: snapshot.emitted_events,
+        history_warnings,
         result_metadata: TurnResultMetadata {
             provider_id: provider_id.to_string(),
             model_id: model_id.to_string(),

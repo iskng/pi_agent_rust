@@ -54,3 +54,13 @@ Validated the fixes with `cargo fmt --check`, `cargo check -p pi_lynx_sdk --all-
 
 Closed the last open review issue by threading an explicit started/executed bit through `AgentEvent::ToolExecutionEnd`, tracking tool-adapter entry separately from synthetic aborted/skipped completions, and teaching the Lynx embed bridge to count only actually started host tools.
 Validated the fix with `cargo fmt --check`, `cargo check --all-targets`, `cargo nextest run -p pi_lynx_sdk --test runtime_turn`, `cargo nextest run --test json_mode_parity json_parity_tool_execution_end_schema`, and `cargo nextest run --test sdk_integration sdk_conformance_agent_event_json_schema`; `cargo clippy --all-targets -- -D warnings` is still blocked by unrelated pre-existing warnings in `src/extensions.rs`, `src/extensions_js.rs`, `src/interactive/*`, `src/providers/bedrock.rs`, `src/session*.rs`, and `src/sse.rs`.
+
+## Review Follow-Up
+
+- [x] [P1][M][T16] Preserve `BootstrapArtifacts.history_warnings` through `run_turn(...)` and `continue_turn(...)` so the high-level runtime API surfaces recoverable transcript reconstruction diagnostics instead of discarding them during execution assembly
+- [x] [P1][M][T17] Stop translating synthetic skipped/aborted `AgentEvent::ToolExecutionStart`/`ToolExecutionEnd` pairs into normal embed tool lifecycle events, or thread explicit execution state through `EmbedEvent` so hosts can distinguish queued tool proposals from host adapters that actually started
+
+## Session 8
+
+Closed the last two review follow-ups by threading `history_warnings` into `TurnResult`, updating the embed contract/spec to document warning preservation and `ToolCompleted.executed`, and tightening `AgentEvent::ToolExecutionStart` so it fires only when a tool adapter actually begins executing.
+Validated with `cargo fmt --check`, `cargo check -p pi_lynx_sdk --all-targets`, `cargo clippy -p pi_lynx_sdk --all-targets --no-deps -- -D warnings`, `cargo nextest run -p pi_lynx_sdk`, `cargo nextest run --test json_mode_parity json_parity_tool_execution_start_schema json_parity_tool_execution_end_schema`, and `cargo nextest run --test sdk_integration sdk_tool_execution sdk_conformance_tool_event_ordering`.

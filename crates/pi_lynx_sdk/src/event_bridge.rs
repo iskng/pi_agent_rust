@@ -155,6 +155,7 @@ impl EventBridge {
                     tool_call_id,
                     tool_name,
                     is_error,
+                    executed,
                 });
             }
             AgentEvent::AgentStart { .. }

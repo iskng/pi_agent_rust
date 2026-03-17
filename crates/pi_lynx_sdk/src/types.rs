@@ -400,6 +400,8 @@ pub struct TurnResult {
     pub usage: Option<Usage>,
     /// Optional recorded event stream when the host asks for it.
     pub emitted_events: Option<Vec<EmbedEvent>>,
+    /// Recoverable transcript reconstruction warnings observed before execution.
+    pub history_warnings: Vec<HistoryWarning>,
     /// Structured completion metadata.
     pub result_metadata: TurnResultMetadata,
 }
@@ -447,6 +449,7 @@ pub enum EmbedEvent {
         tool_call_id: String,
         tool_name: String,
         is_error: bool,
+        executed: bool,
     },
     /// Raw provider stream event forwarded to the host.
     ProviderEvent { event: StreamEvent },

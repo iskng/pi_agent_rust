@@ -8,11 +8,11 @@ use pi::sdk::{
 };
 use pi::sdk::{AssistantMessage, ToolCall, Usage, UserContent, UserMessage};
 use pi_lynx_sdk::{
-    BootstrapArtifacts, ContinueTurnRequest, EmbedErrorKind, EmbedEvent, HostToolAdapter,
-    HostToolDefinition, HostToolError, HostToolKind, HostToolOutput, HostToolRequest,
-    HostTranscriptEntry, HostTranscriptRole, LynxEmbedConfig, ProviderSelection, RuntimeMetadata,
-    ToolPolicy, TurnRequest, continue_turn, continue_turn_with_artifacts, run_turn,
-    run_turn_with_artifacts,
+    BootstrapArtifacts, ContinueTurnRequest, EmbedErrorKind, EmbedEvent, HistoryWarningKind,
+    HostToolAdapter, HostToolDefinition, HostToolError, HostToolKind, HostToolOutput,
+    HostToolRequest, HostTranscriptEntry, HostTranscriptRole, LynxEmbedConfig, ProviderSelection,
+    RuntimeMetadata, ToolPolicy, TurnRequest, continue_turn, continue_turn_with_artifacts,
+    run_turn, run_turn_with_artifacts,
 };
 use pretty_assertions::assert_eq;
 use serde_json::{Value, json};
@@ -309,7 +309,7 @@ fn run_turn_with_artifacts_emits_message_events_and_result_metadata() {
                 capture_events: true,
                 abort_signal: None,
             },
-            bootstrap_artifacts(provider, empty_tool_registry(), Vec::new()),
+            bootstrap_artifacts(provider, empty_tool_registry(), Vec::new(), Vec::new()),
         )
         .await
         .expect("turn result");
@@ -372,7 +372,7 @@ fn continue_turn_with_artifacts_uses_reconstructed_history() {
                 capture_events: false,
                 abort_signal: None,
             },
-            bootstrap_artifacts(provider, empty_tool_registry(), history),
+            bootstrap_artifacts(provider, empty_tool_registry(), history, Vec::new()),
         )
         .await
         .expect("continue result");
@@ -382,6 +382,112 @@ fn continue_turn_with_artifacts_uses_reconstructed_history() {
             result.assistant_message.content.as_slice(),
             [ContentBlock::Text(text)] if text.text == "continuing from history"
         ));
+    });
+}
+
+/// WHY: transcript reconstruction warnings must survive the shared execution
+/// path so hosts do not lose recoverable diagnostics after bootstrap succeeds.
+#[test]
+fn run_turn_with_artifacts_preserves_history_warnings() {
+    let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+        .build()
+        .expect("runtime");
+
+    runtime.block_on(async {
+        let provider = Arc::new(ScriptedProvider {
+            steps: Mutex::new(VecDeque::from([ProviderStep::Text {
+                expected_messages: 1,
+                text: "warning surfaced",
+            }])),
+        });
+
+        let result = run_turn_with_artifacts(
+            TurnRequest {
+                config: sample_config(),
+                transcript: Vec::new(),
+                prompt: "continue".to_string(),
+                on_event: None,
+                capture_events: false,
+                abort_signal: None,
+            },
+            bootstrap_artifacts(
+                provider,
+                empty_tool_registry(),
+                Vec::new(),
+                vec![pi_lynx_sdk::HistoryWarning {
+                    kind: HistoryWarningKind::CustomContentBlockDropped,
+                    message_id: Some("c1".to_string()),
+                    detail: "dropped custom image".to_string(),
+                }],
+            ),
+        )
+        .await
+        .expect("turn result");
+
+        assert_eq!(result.history_warnings.len(), 1);
+        assert_eq!(
+            result.history_warnings[0].kind,
+            HistoryWarningKind::CustomContentBlockDropped
+        );
+        assert_eq!(result.history_warnings[0].message_id.as_deref(), Some("c1"));
+    });
+}
+
+/// WHY: continuation uses the same runtime assembly path, so it must preserve
+/// bootstrap warnings for callers that resume from prevalidated artifacts.
+#[test]
+fn continue_turn_with_artifacts_preserves_history_warnings() {
+    let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+        .build()
+        .expect("runtime");
+
+    runtime.block_on(async {
+        let history = vec![
+            Message::User(UserMessage {
+                content: UserContent::Text("inspect repo".to_string()),
+                timestamp: 1,
+            }),
+            Message::assistant(assistant_message(
+                vec![ContentBlock::Text(TextContent::new("Working on it."))],
+                StopReason::Stop,
+                None,
+            )),
+        ];
+        let provider = Arc::new(ScriptedProvider {
+            steps: Mutex::new(VecDeque::from([ProviderStep::Text {
+                expected_messages: 2,
+                text: "warnings preserved on continue",
+            }])),
+        });
+
+        let result = continue_turn_with_artifacts(
+            ContinueTurnRequest {
+                config: sample_config(),
+                transcript: Vec::new(),
+                on_event: None,
+                capture_events: false,
+                abort_signal: None,
+            },
+            bootstrap_artifacts(
+                provider,
+                empty_tool_registry(),
+                history,
+                vec![pi_lynx_sdk::HistoryWarning {
+                    kind: HistoryWarningKind::CustomContentBlockDropped,
+                    message_id: Some("c1".to_string()),
+                    detail: "dropped custom image".to_string(),
+                }],
+            ),
+        )
+        .await
+        .expect("continue result");
+
+        assert_eq!(result.history_warnings.len(), 1);
+        assert_eq!(
+            result.history_warnings[0].kind,
+            HistoryWarningKind::CustomContentBlockDropped
+        );
+        assert_eq!(result.history_warnings[0].message_id.as_deref(), Some("c1"));
     });
 }
 
@@ -509,7 +615,7 @@ fn run_turn_with_artifacts_converts_provider_stream_failure_into_error() {
                 capture_events: false,
                 abort_signal: None,
             },
-            bootstrap_artifacts(provider, empty_tool_registry(), Vec::new()),
+            bootstrap_artifacts(provider, empty_tool_registry(), Vec::new(), Vec::new()),
         )
         .await
         .expect_err("provider stream failure must error");
@@ -574,7 +680,7 @@ fn runtime_handles_tool_failures_and_abort_paths() {
                 capture_events: false,
                 abort_signal: None,
             },
-            bootstrap_artifacts(tool_provider, tool_registry, Vec::new()),
+            bootstrap_artifacts(tool_provider, tool_registry, Vec::new(), Vec::new()),
         )
         .await
         .expect("tool failure stays in-band");
@@ -605,7 +711,12 @@ fn runtime_handles_tool_failures_and_abort_paths() {
                 capture_events: true,
                 abort_signal: Some(stream_abort_signal),
             },
-            bootstrap_artifacts(stream_provider, empty_tool_registry(), Vec::new()),
+            bootstrap_artifacts(
+                stream_provider,
+                empty_tool_registry(),
+                Vec::new(),
+                Vec::new(),
+            ),
         )
         .await
         .expect("abort during provider stream returns partial result");
@@ -650,14 +761,14 @@ fn runtime_handles_tool_failures_and_abort_paths() {
                 capture_events: false,
                 abort_signal: Some(tool_abort_signal),
             },
-            bootstrap_artifacts(hanging_provider, hanging_registry, Vec::new()),
+            bootstrap_artifacts(hanging_provider, hanging_registry, Vec::new(), Vec::new()),
         )
         .await
         .expect("abort during tool execution returns partial result");
 
         assert_eq!(tool_abort_result.stop_reason, Some(StopReason::Aborted));
         assert!(tool_abort_result.result_metadata.aborted);
-        assert_eq!(tool_abort_result.result_metadata.tool_calls_executed, 0);
+        assert_eq!(tool_abort_result.result_metadata.tool_calls_executed, 1);
         assert!(tool_abort_result.result_metadata.had_errors);
         assert!(tool_abort_result.emitted_events.is_none());
     });
@@ -709,7 +820,7 @@ fn runtime_counts_only_started_tools_in_aborted_multi_tool_batches() {
                 capture_events: true,
                 abort_signal: Some(abort_signal),
             },
-            bootstrap_artifacts(provider, tool_registry, Vec::new()),
+            bootstrap_artifacts(provider, tool_registry, Vec::new(), Vec::new()),
         )
         .await
         .expect("abort during multi-tool execution returns partial result");
@@ -718,6 +829,31 @@ fn runtime_counts_only_started_tools_in_aborted_multi_tool_batches() {
         assert!(result.result_metadata.aborted);
         assert_eq!(result.result_metadata.tool_calls_executed, 1);
         assert!(result.result_metadata.had_errors);
+        let emitted_events = result.emitted_events.expect("captured events");
+        assert!(emitted_events.iter().any(|event| matches!(
+            event,
+            EmbedEvent::ToolStarted { tool_call_id, .. } if tool_call_id == "call_1"
+        )));
+        assert!(!emitted_events.iter().any(|event| matches!(
+            event,
+            EmbedEvent::ToolStarted { tool_call_id, .. } if tool_call_id == "call_2"
+        )));
+        assert!(emitted_events.iter().any(|event| matches!(
+            event,
+            EmbedEvent::ToolCompleted {
+                tool_call_id,
+                executed: true,
+                ..
+            } if tool_call_id == "call_1"
+        )));
+        assert!(emitted_events.iter().any(|event| matches!(
+            event,
+            EmbedEvent::ToolCompleted {
+                tool_call_id,
+                executed: false,
+                ..
+            } if tool_call_id == "call_2"
+        )));
     });
 }
 
@@ -753,7 +889,7 @@ fn run_turn_with_artifacts_skips_event_capture_when_not_requested() {
                 capture_events: false,
                 abort_signal: None,
             },
-            bootstrap_artifacts(provider, empty_tool_registry(), Vec::new()),
+            bootstrap_artifacts(provider, empty_tool_registry(), Vec::new(), Vec::new()),
         )
         .await
         .expect("turn result");
@@ -846,6 +982,7 @@ fn bootstrap_artifacts(
     provider: Arc<dyn Provider>,
     tool_registry: ToolRegistry,
     history: Vec<Message>,
+    history_warnings: Vec<pi_lynx_sdk::HistoryWarning>,
 ) -> BootstrapArtifacts {
     let mut session = Session::in_memory();
     session.set_model_header(
@@ -871,7 +1008,7 @@ fn bootstrap_artifacts(
         tool_registry,
         provider,
         history,
-        history_warnings: Vec::new(),
+        history_warnings,
     }
 }
 

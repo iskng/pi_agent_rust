@@ -1724,16 +1724,7 @@ impl Agent {
         let mut results = Vec::new();
         let mut steering_messages: Option<Vec<Message>> = None;
 
-        // Phase 1: Emit start events for ALL tools up front.
-        for tool_call in tool_calls {
-            on_event(AgentEvent::ToolExecutionStart {
-                tool_call_id: tool_call.id.clone(),
-                tool_name: tool_call.name.clone(),
-                args: tool_call.arguments.clone(),
-            });
-        }
-
-        // Phase 2: Execute tools with safety barriers.
+        // Execute tools with safety barriers.
         let mut pending_parallel: Vec<(usize, ToolCall)> = Vec::new();
         let mut tool_outputs: Vec<Option<(ToolOutput, bool)>> = vec![None; tool_calls.len()];
         let mut tool_started = vec![false; tool_calls.len()];
@@ -1835,7 +1826,7 @@ impl Agent {
             }
         }
 
-        // Phase 3: Process results sequentially and handle skips.
+        // Process results sequentially and handle skips.
         for (index, tool_call) in tool_calls.iter().enumerate() {
             // Check for new steering if we haven't already found some.
             // This catches steering messages that arrived during the *last* tool's execution.
@@ -2000,6 +1991,12 @@ impl Agent {
         let tool_args = tool_call.arguments.clone();
         let on_event = Arc::clone(&on_event);
 
+        on_event(AgentEvent::ToolExecutionStart {
+            tool_call_id: tool_id.clone(),
+            tool_name: tool_name.clone(),
+            args: tool_args.clone(),
+        });
+
         let update_callback = move |update: ToolUpdate| {
             on_event(AgentEvent::ToolExecutionUpdate {
                 tool_call_id: tool_id.clone(),
@@ -2116,8 +2113,6 @@ impl Agent {
             is_error: true,
         };
 
-        // Note: Phase 1 already emitted ToolExecutionStart for all tools,
-        // so we only emit Update and End here.
         on_event(AgentEvent::ToolExecutionUpdate {
             tool_call_id: tool_call.id.clone(),
             tool_name: tool_call.name.clone(),
